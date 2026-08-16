@@ -3,15 +3,19 @@
 CO₂ EMISSION PREDICTOR - DATASET API
 ===============================================================================
 
-Production-ready FastAPI routes for inspecting the dataset used by the
-CO₂-emission machine-learning prediction pipeline.
+Production-ready FastAPI routes for inspecting and serving the actual
+CO₂-emission dataset used by the machine-learning prediction pipeline.
 
-Endpoint
---------
+Endpoints
+---------
+GET /dataset/health
+    Lightweight dataset availability and structural health check.
+
 GET /dataset/metadata
+    Dynamically generated dataset statistics and model metadata.
 
-The endpoint dynamically reads the configured CSV dataset and generates
-statistics from the actual data.
+GET /dataset/records
+    Returns actual records read directly from the deployed CSV dataset.
 
 Canonical model
 ---------------
@@ -24,13 +28,17 @@ Target:
 
 Important
 ---------
-Dataset statistics are NEVER hardcoded.
+Dataset statistics and dataset records are NEVER hardcoded.
+
+The API always reads the deployed CSV dataset.
 
 Environment variables
 ---------------------
 CO2_DATASET_DIRECTORY
     Optional dataset directory.
-    Defaults to <project-root>/data
+
+    Defaults to:
+        <project-root>/data
 
 CO2_DATASET_FILENAMES
     Optional comma-separated list of supported filenames.
@@ -39,9 +47,10 @@ CO2_DATASET_FILENAMES
         CO2_DATASET_FILENAMES=FuelConsumption.csv,co2_emissions.csv
 
 CO2_DATASET_CACHE_TTL_SECONDS
-    Optional cache lifetime.
+    Optional metadata/records cache lifetime.
 
-    Defaults to 300 seconds.
+    Defaults to:
+        300 seconds
 
 The cache is automatically invalidated when the dataset file's modification
 time or size changes.
@@ -55,13 +64,14 @@ import hashlib
 import logging
 import math
 import os
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -105,6 +115,17 @@ MODEL_DESCRIPTION = (
 
 
 # =============================================================================
+# API LIMITS
+# =============================================================================
+
+DEFAULT_PAGE_SIZE = 25
+
+MAX_PAGE_SIZE = 100
+
+MAX_SEARCH_LENGTH = 100
+
+
+# =============================================================================
 # ENVIRONMENT CONFIGURATION
 # =============================================================================
 
@@ -117,7 +138,7 @@ CURRENT_FILE = Path(__file__).resolve()
 # │   └── routes/
 # │       └── dataset.py
 # └── data/
-
+#
 PROJECT_ROOT = CURRENT_FILE.parents[2]
 
 DEFAULT_DATA_DIRECTORY = PROJECT_ROOT / "data"
@@ -135,18 +156,20 @@ def get_data_directory() -> Path:
     )
 
     if configured_directory:
-        return Path(configured_directory).expanduser().resolve()
+        return Path(
+            configured_directory
+        ).expanduser().resolve()
 
     return DEFAULT_DATA_DIRECTORY
 
 
 def get_cache_ttl_seconds() -> int:
     """
-    Return the dataset metadata cache lifetime.
+    Return the dataset cache lifetime.
 
     Defaults to 300 seconds.
 
-    Invalid or negative values fall back to the default.
+    Invalid or negative values fall back to 300 seconds.
     """
 
     raw_value = os.getenv(
@@ -156,7 +179,8 @@ def get_cache_ttl_seconds() -> int:
 
     try:
         value = int(raw_value)
-    except ValueError:
+
+    except (TypeError, ValueError):
         logger.warning(
             (
                 "Invalid CO2_DATASET_CACHE_TTL_SECONDS=%r. "
@@ -164,6 +188,7 @@ def get_cache_ttl_seconds() -> int:
             ),
             raw_value,
         )
+
         return 300
 
     if value < 0:
@@ -174,6 +199,7 @@ def get_cache_ttl_seconds() -> int:
             ),
             raw_value,
         )
+
         return 300
 
     return value
@@ -197,7 +223,7 @@ def get_dataset_filenames() -> tuple[str, ...]:
     """
     Return configured dataset filenames.
 
-    Environment variable example:
+    Example:
 
         CO2_DATASET_FILENAMES=FuelConsumption.csv,co2_emissions.csv
     """
@@ -219,6 +245,7 @@ def get_dataset_filenames() -> tuple[str, ...]:
         logger.warning(
             "CO2_DATASET_FILENAMES was empty. Using defaults."
         )
+
         return DEFAULT_DATASET_FILENAMES
 
     return filenames
@@ -279,9 +306,7 @@ class DatasetIntegrity(BaseModel):
 
 
 class DatasetMetadataResponse(BaseModel):
-    """
-    Complete dataset metadata response.
-    """
+    """Complete dataset metadata response."""
 
     datasetName: str
     title: str
@@ -314,6 +339,51 @@ class DatasetMetadataResponse(BaseModel):
     lastUpdated: str | None = None
 
     integrity: DatasetIntegrity
+
+
+# =============================================================================
+# DATASET RECORD RESPONSE MODELS
+# =============================================================================
+
+class DatasetRecord(BaseModel):
+    """
+    A single actual dataset row.
+
+    The dictionary is intentionally dynamic because the CSV may contain
+    additional columns beyond the model's three canonical columns.
+    """
+
+    model_config = ConfigDict(
+        extra="allow"
+    )
+
+
+class DatasetRecordsResponse(BaseModel):
+    """
+    Paginated dataset records response.
+
+    The records are read directly from the deployed CSV dataset.
+    """
+
+    datasetName: str
+
+    columns: list[str]
+
+    records: list[dict[str, Any]]
+
+    page: int
+
+    pageSize: int
+
+    totalRecords: int
+
+    totalPages: int
+
+    hasNextPage: bool
+
+    hasPreviousPage: bool
+
+    returnedRecords: int
 
 
 # =============================================================================
@@ -352,7 +422,9 @@ def clear_dataset_cache() -> None:
         _cached_file_size = None
         _cached_at = None
 
-    logger.info("CO₂ dataset metadata cache cleared.")
+    logger.info(
+        "CO₂ dataset metadata cache cleared."
+    )
 
 
 def get_dataset_signature(
@@ -362,17 +434,22 @@ def get_dataset_signature(
     Return a lightweight dataset signature.
 
     The signature consists of:
+
         - modification time in nanoseconds
         - file size in bytes
     """
 
     try:
         stat = dataset_path.stat()
+
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="The CO₂ emissions dataset could not be found.",
+            detail=(
+                "The CO₂ emissions dataset could not be found."
+            ),
         ) from exc
+
     except OSError as exc:
         logger.exception(
             "Unable to inspect dataset file."
@@ -380,10 +457,15 @@ def get_dataset_signature(
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="The CO₂ emissions dataset could not be accessed.",
+            detail=(
+                "The CO₂ emissions dataset could not be accessed."
+            ),
         ) from exc
 
-    return stat.st_mtime_ns, stat.st_size
+    return (
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
 
 
 def is_cache_valid(
@@ -410,8 +492,6 @@ def is_cache_valid(
     if _cached_at is None:
         return False
 
-    import time
-
     age = time.monotonic() - _cached_at
 
     return age <= get_cache_ttl_seconds()
@@ -427,6 +507,7 @@ def get_cached_metadata(
     """
 
     with _CACHE_LOCK:
+
         if is_cache_valid(
             dataset_path,
             mtime_ns,
@@ -454,8 +535,6 @@ def store_cached_metadata(
         _cached_file_size, \
         _cached_at
 
-    import time
-
     with _CACHE_LOCK:
         _cached_metadata = metadata
         _cached_dataset_path = dataset_path
@@ -472,26 +551,32 @@ def find_dataset() -> Path | None:
     """
     Locate the supported CO₂ emissions dataset.
 
-    Preferred filenames are checked first. A case-insensitive fallback
-    is then performed.
+    Preferred filenames are checked first.
+
+    A case-insensitive fallback is then performed.
     """
 
     data_directory = get_data_directory()
 
     logger.debug(
-        "Searching for CO₂ dataset in configured directory."
+        "Searching for CO₂ dataset in: %s",
+        data_directory,
     )
 
     if not data_directory.exists():
         logger.error(
-            "Configured dataset directory does not exist."
+            "Configured dataset directory does not exist: %s",
+            data_directory,
         )
+
         return None
 
     if not data_directory.is_dir():
         logger.error(
-            "Configured dataset path is not a directory."
+            "Configured dataset path is not a directory: %s",
+            data_directory,
         )
+
         return None
 
     filenames = get_dataset_filenames()
@@ -501,13 +586,18 @@ def find_dataset() -> Path | None:
     # -------------------------------------------------------------------------
 
     for filename in filenames:
-        dataset_path = data_directory / filename
+
+        dataset_path = (
+            data_directory / filename
+        )
 
         if dataset_path.is_file():
+
             logger.info(
                 "CO₂ dataset found: %s",
-                dataset_path.name,
+                dataset_path,
             )
+
             return dataset_path
 
     # -------------------------------------------------------------------------
@@ -523,10 +613,12 @@ def find_dataset() -> Path | None:
             ),
             key=lambda path: path.name.lower(),
         )
+
     except OSError:
         logger.exception(
-            "Unable to inspect configured dataset directory."
+            "Unable to inspect dataset directory."
         )
+
         return None
 
     expected_names = {
@@ -535,15 +627,22 @@ def find_dataset() -> Path | None:
     }
 
     for file_path in available_files:
+
         if file_path.name.lower() in expected_names:
+
             logger.info(
-                "CO₂ dataset found using case-insensitive lookup: %s",
-                file_path.name,
+                (
+                    "CO₂ dataset found using "
+                    "case-insensitive lookup: %s"
+                ),
+                file_path,
             )
+
             return file_path
 
     logger.error(
-        "No supported CO₂ dataset found."
+        "No supported CO₂ dataset found in %s.",
+        data_directory,
     )
 
     return None
@@ -553,7 +652,9 @@ def find_dataset() -> Path | None:
 # COLUMN NORMALIZATION
 # =============================================================================
 
-def normalize_column_name(column: Any) -> str:
+def normalize_column_name(
+    column: Any,
+) -> str:
     """
     Normalize a dataframe column name.
 
@@ -573,10 +674,7 @@ def normalize_dataframe_columns(
     """
     Return a copy with normalized column names.
 
-    Raises
-    ------
-    ValueError
-        If normalization creates duplicate columns.
+    Raises ValueError when normalization creates duplicate columns.
     """
 
     normalized = dataframe.copy()
@@ -589,17 +687,20 @@ def normalize_dataframe_columns(
     duplicated_columns = (
         normalized.columns[
             normalized.columns.duplicated()
-        ]
-        .tolist()
+        ].tolist()
     )
 
     if duplicated_columns:
+
         raise ValueError(
-            "Dataset contains duplicate column names after normalization: "
-            + ", ".join(
-                map(
-                    str,
-                    duplicated_columns,
+            (
+                "Dataset contains duplicate column names "
+                "after normalization: "
+                + ", ".join(
+                    map(
+                        str,
+                        duplicated_columns,
+                    )
                 )
             )
         )
@@ -615,7 +716,7 @@ def validate_required_columns(
     dataframe: pd.DataFrame,
 ) -> None:
     """
-    Validate the columns required by the ML model.
+    Validate columns required by the ML model.
     """
 
     required_columns = [
@@ -668,6 +769,7 @@ def convert_model_columns_to_numeric(
     ].copy()
 
     for column in result.columns:
+
         result[column] = pd.to_numeric(
             result[column],
             errors="coerce",
@@ -687,8 +789,6 @@ def calculate_statistics(
     Calculate safe descriptive statistics.
 
     NaN and infinite values are excluded.
-
-    If no valid numeric values exist, None is returned for each statistic.
     """
 
     numeric = pd.to_numeric(
@@ -697,7 +797,7 @@ def calculate_statistics(
     )
 
     values = numeric.to_numpy(
-        dtype=np.float64,
+        dtype=np.float64
     )
 
     finite_values = values[
@@ -705,6 +805,7 @@ def calculate_statistics(
     ]
 
     if finite_values.size == 0:
+
         return {
             "min": None,
             "max": None,
@@ -725,10 +826,18 @@ def calculate_statistics(
     )
 
     return {
-        "min": float(np.min(finite_values)),
-        "max": float(np.max(finite_values)),
-        "mean": float(np.mean(finite_values)),
-        "median": float(np.median(finite_values)),
+        "min": float(
+            np.min(finite_values)
+        ),
+        "max": float(
+            np.max(finite_values)
+        ),
+        "mean": float(
+            np.mean(finite_values)
+        ),
+        "median": float(
+            np.median(finite_values)
+        ),
         "std": standard_deviation,
     }
 
@@ -741,38 +850,45 @@ def calculate_sha256(
     dataset_path: Path,
 ) -> str:
     """
-    Calculate the SHA-256 checksum of the dataset.
-
-    The checksum provides a reproducible fingerprint of the exact dataset
-    currently being served.
+    Calculate SHA-256 checksum of the actual dataset file.
     """
 
     digest = hashlib.sha256()
 
     try:
+
         with dataset_path.open(
             "rb"
         ) as file:
+
             for chunk in iter(
-                lambda: file.read(1024 * 1024),
+                lambda: file.read(
+                    1024 * 1024
+                ),
                 b"",
             ):
                 digest.update(chunk)
 
     except FileNotFoundError as exc:
+
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="The CO₂ emissions dataset could not be found.",
+            detail=(
+                "The CO₂ emissions dataset could not be found."
+            ),
         ) from exc
 
     except OSError as exc:
+
         logger.exception(
             "Unable to calculate dataset checksum."
         )
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to verify dataset integrity.",
+            detail=(
+                "Unable to verify dataset integrity."
+            ),
         ) from exc
 
     return digest.hexdigest()
@@ -786,6 +902,7 @@ def build_dataset_integrity(
     """
 
     try:
+
         stat = dataset_path.stat()
 
         modified_at = (
@@ -798,7 +915,9 @@ def build_dataset_integrity(
         )
 
         return DatasetIntegrity(
-            fileSizeBytes=int(stat.st_size),
+            fileSizeBytes=int(
+                stat.st_size
+            ),
             sha256=calculate_sha256(
                 dataset_path
             ),
@@ -806,19 +925,25 @@ def build_dataset_integrity(
         )
 
     except FileNotFoundError as exc:
+
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="The CO₂ emissions dataset could not be found.",
+            detail=(
+                "The CO₂ emissions dataset could not be found."
+            ),
         ) from exc
 
     except OSError as exc:
+
         logger.exception(
             "Unable to inspect dataset integrity."
         )
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to inspect dataset integrity.",
+            detail=(
+                "Unable to inspect dataset integrity."
+            ),
         ) from exc
 
 
@@ -834,10 +959,116 @@ def format_statistic(
     Format a statistic safely for frontend display.
     """
 
-    if value is None or not math.isfinite(value):
+    if value is None:
+        return "N/A"
+
+    if not math.isfinite(value):
         return "N/A"
 
     return f"{value:.2f}{suffix}"
+
+
+# =============================================================================
+# DATAFRAME VALUE SERIALIZATION
+# =============================================================================
+
+def serialize_dataframe_value(
+    value: Any,
+) -> Any:
+    """
+    Convert pandas / NumPy values into JSON-safe Python values.
+
+    NaN and infinity are returned as None.
+    """
+
+    if value is None:
+        return None
+
+    if pd.isna(value):
+        return None
+
+    if isinstance(
+        value,
+        (
+            np.integer,
+        ),
+    ):
+        return int(value)
+
+    if isinstance(
+        value,
+        (
+            np.floating,
+        ),
+    ):
+        float_value = float(value)
+
+        if not math.isfinite(
+            float_value
+        ):
+            return None
+
+        return float_value
+
+    if isinstance(
+        value,
+        (
+            np.bool_,
+        ),
+    ):
+        return bool(value)
+
+    if isinstance(
+        value,
+        (
+            pd.Timestamp,
+        ),
+    ):
+        return value.isoformat()
+
+    if isinstance(
+        value,
+        (
+            np.ndarray,
+        ),
+    ):
+        return value.tolist()
+
+    return value
+
+
+def dataframe_to_records(
+    dataframe: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """
+    Convert a dataframe into JSON-safe dictionaries.
+    """
+
+    records: list[dict[str, Any]] = []
+
+    columns = [
+        str(column)
+        for column in dataframe.columns
+    ]
+
+    for row in dataframe.itertuples(
+        index=False,
+        name=None,
+    ):
+
+        record = {
+            column: serialize_dataframe_value(
+                value
+            )
+            for column, value in zip(
+                columns,
+                row,
+            )
+        }
+
+        records.append(record)
+
+    return records
 
 
 # =============================================================================
@@ -871,6 +1102,7 @@ def build_dataset_metadata(
     )
 
     if total_records == 0:
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
@@ -904,7 +1136,9 @@ def build_dataset_metadata(
 
     valid_mask = (
         model_dataframe.notna().all(axis=1)
-        & np.isfinite(numeric_array).all(axis=1)
+        & np.isfinite(
+            numeric_array
+        ).all(axis=1)
     )
 
     valid_record_count = int(
@@ -912,11 +1146,13 @@ def build_dataset_metadata(
     )
 
     invalid_record_count = (
-        total_records - valid_record_count
+        total_records
+        - valid_record_count
     )
 
     validation_percentage = (
-        valid_record_count / total_records
+        valid_record_count
+        / total_records
     ) * 100.0
 
     # -------------------------------------------------------------------------
@@ -939,6 +1175,7 @@ def build_dataset_metadata(
     ] = {}
 
     for column in FEATURE_COLUMNS:
+
         feature_statistics[column] = (
             DatasetStatistics(
                 **calculate_statistics(
@@ -951,9 +1188,13 @@ def build_dataset_metadata(
     # Target statistics
     # -------------------------------------------------------------------------
 
-    target_statistics = DatasetStatistics(
-        **calculate_statistics(
-            model_dataframe[TARGET_COLUMN]
+    target_statistics = (
+        DatasetStatistics(
+            **calculate_statistics(
+                model_dataframe[
+                    TARGET_COLUMN
+                ]
+            )
         )
     )
 
@@ -962,6 +1203,7 @@ def build_dataset_metadata(
     # -------------------------------------------------------------------------
 
     feature_descriptions = {
+
         "ENGINESIZE": DatasetFeature(
             column="ENGINESIZE",
             role="Feature",
@@ -970,8 +1212,11 @@ def build_dataset_metadata(
                 "Engine displacement measured in litres."
             ),
         ),
+
         "FUELCONSUMPTION_COMB_MPG": DatasetFeature(
-            column="FUELCONSUMPTION_COMB_MPG",
+            column=(
+                "FUELCONSUMPTION_COMB_MPG"
+            ),
             role="Feature",
             unit="MPG",
             description=(
@@ -979,6 +1224,7 @@ def build_dataset_metadata(
                 "in miles per gallon."
             ),
         ),
+
         "CO2EMISSIONS": DatasetFeature(
             column="CO2EMISSIONS",
             role="Target",
@@ -1011,6 +1257,7 @@ def build_dataset_metadata(
     ]
 
     statistics = [
+
         DatasetStatisticsCard(
             label="Total Records",
             value=str(total_records),
@@ -1019,6 +1266,7 @@ def build_dataset_metadata(
             ),
             type="records",
         ),
+
         DatasetStatisticsCard(
             label="Engine Size",
             value=format_statistic(
@@ -1030,6 +1278,7 @@ def build_dataset_metadata(
             ),
             type="engine-size",
         ),
+
         DatasetStatisticsCard(
             label="Fuel Consumption",
             value=format_statistic(
@@ -1041,6 +1290,7 @@ def build_dataset_metadata(
             ),
             type="fuel-consumption",
         ),
+
         DatasetStatisticsCard(
             label="CO₂ Emissions",
             value=format_statistic(
@@ -1061,7 +1311,9 @@ def build_dataset_metadata(
     model = DatasetModelInformation(
         name=MODEL_NAME,
         description=MODEL_DESCRIPTION,
-        features=list(FEATURE_COLUMNS),
+        features=list(
+            FEATURE_COLUMNS
+        ),
         target=TARGET_COLUMN,
         targetUnit=TARGET_UNIT,
     )
@@ -1071,7 +1323,10 @@ def build_dataset_metadata(
     # -------------------------------------------------------------------------
 
     try:
-        modified_timestamp = dataset_path.stat().st_mtime
+
+        modified_timestamp = (
+            dataset_path.stat().st_mtime
+        )
 
         last_updated = (
             pd.Timestamp
@@ -1083,9 +1338,14 @@ def build_dataset_metadata(
         )
 
     except OSError:
+
         logger.warning(
-            "Unable to determine dataset modification timestamp."
+            (
+                "Unable to determine dataset "
+                "modification timestamp."
+            )
         )
+
         last_updated = None
 
     # -------------------------------------------------------------------------
@@ -1101,29 +1361,50 @@ def build_dataset_metadata(
     # -------------------------------------------------------------------------
 
     return DatasetMetadataResponse(
+
         datasetName=dataset_path.stem,
+
         title="CO₂ Emissions Dataset",
+
         description=(
             "Dataset used by the CO₂ Emission Predictor "
             "machine-learning pipeline."
         ),
+
         recordCount=total_records,
+
         columnCount=total_columns,
+
         columnNames=column_names,
+
         missingValues=missing_values,
+
         validRecordCount=valid_record_count,
+
         invalidRecordCount=invalid_record_count,
-        featureCount=len(FEATURE_COLUMNS),
+
+        featureCount=len(
+            FEATURE_COLUMNS
+        ),
+
         targetCount=1,
+
         validationPercentage=float(
             validation_percentage
         ),
+
         features=features,
+
         featureStatistics=feature_statistics,
+
         targetStatistics=target_statistics,
+
         statistics=statistics,
+
         model=model,
+
         lastUpdated=last_updated,
+
         integrity=integrity,
     )
 
@@ -1138,11 +1419,13 @@ def load_dataset(
     """
     Load the configured CSV dataset.
 
-    UTF-8 with BOM is preferred. Latin-1 is supported as a fallback for
-    legacy datasets.
+    UTF-8 with BOM is preferred.
+
+    Latin-1 is supported as a fallback for legacy datasets.
     """
 
     try:
+
         return pd.read_csv(
             dataset_path,
             encoding="utf-8-sig",
@@ -1150,6 +1433,7 @@ def load_dataset(
         )
 
     except UnicodeDecodeError:
+
         logger.warning(
             (
                 "UTF-8 decoding failed. "
@@ -1158,6 +1442,7 @@ def load_dataset(
         )
 
         try:
+
             return pd.read_csv(
                 dataset_path,
                 encoding="latin-1",
@@ -1165,21 +1450,25 @@ def load_dataset(
             )
 
         except UnicodeDecodeError as exc:
+
             logger.exception(
                 "Dataset encoding is unsupported."
             )
 
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status_code=(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR
+                ),
                 detail=(
-                    "The CO₂ emissions dataset uses an "
-                    "unsupported text encoding."
+                    "The CO₂ emissions dataset uses "
+                    "an unsupported text encoding."
                 ),
             ) from exc
 
     except FileNotFoundError as exc:
+
         logger.exception(
-            "Dataset file disappeared before it could be loaded."
+            "Dataset file disappeared before loading."
         )
 
         raise HTTPException(
@@ -1190,6 +1479,7 @@ def load_dataset(
         ) from exc
 
     except PermissionError as exc:
+
         logger.exception(
             "Permission denied while reading dataset."
         )
@@ -1202,6 +1492,7 @@ def load_dataset(
         ) from exc
 
     except pd.errors.EmptyDataError as exc:
+
         logger.exception(
             "Dataset file is empty."
         )
@@ -1214,6 +1505,7 @@ def load_dataset(
         ) from exc
 
     except pd.errors.ParserError as exc:
+
         logger.exception(
             "Dataset CSV parsing failed."
         )
@@ -1226,6 +1518,7 @@ def load_dataset(
         ) from exc
 
     except OSError as exc:
+
         logger.exception(
             "Unable to access dataset file."
         )
@@ -1259,6 +1552,7 @@ def get_dataset_health() -> dict[str, Any]:
     dataset_path = find_dataset()
 
     if dataset_path is None:
+
         return {
             "status": "unavailable",
             "datasetAvailable": False,
@@ -1266,6 +1560,7 @@ def get_dataset_health() -> dict[str, Any]:
         }
 
     try:
+
         dataframe = load_dataset(
             dataset_path
         )
@@ -1285,25 +1580,36 @@ def get_dataset_health() -> dict[str, Any]:
 
         model_columns_available = (
             required_columns
-            .issubset(available_columns)
+            .issubset(
+                available_columns
+            )
         )
 
         return {
+
             "status": (
                 "healthy"
                 if model_columns_available
                 else "invalid"
             ),
+
             "datasetAvailable": True,
+
             "modelColumnsAvailable": (
                 model_columns_available
             ),
+
             "recordCount": int(
                 len(dataframe)
+            ),
+
+            "datasetName": (
+                dataset_path.stem
             ),
         }
 
     except Exception:
+
         logger.exception(
             "Dataset health check failed."
         )
@@ -1316,7 +1622,7 @@ def get_dataset_health() -> dict[str, Any]:
 
 
 # =============================================================================
-# API ENDPOINT
+# DATASET METADATA
 # =============================================================================
 
 @router.get(
@@ -1326,8 +1632,8 @@ def get_dataset_health() -> dict[str, Any]:
     status_code=status.HTTP_200_OK,
     summary="Get CO₂ emissions dataset metadata",
     description=(
-        "Returns dynamically generated metadata and statistics from "
-        "the actual CO₂ emissions CSV dataset."
+        "Returns dynamically generated metadata and statistics "
+        "from the actual CO₂ emissions CSV dataset."
     ),
 )
 def get_dataset_metadata() -> DatasetMetadataResponse:
@@ -1348,6 +1654,7 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
     dataset_path = find_dataset()
 
     if dataset_path is None:
+
         logger.error(
             "CO₂ emissions dataset was not found."
         )
@@ -1360,7 +1667,7 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
         )
 
     # -------------------------------------------------------------------------
-    # Obtain lightweight file signature
+    # File signature
     # -------------------------------------------------------------------------
 
     mtime_ns, file_size = (
@@ -1380,6 +1687,7 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
     )
 
     if cached_metadata is not None:
+
         logger.debug(
             "Returning cached CO₂ dataset metadata."
         )
@@ -1399,15 +1707,18 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
     # -------------------------------------------------------------------------
 
     try:
+
         metadata = build_dataset_metadata(
             dataframe=dataframe,
             dataset_path=dataset_path,
         )
 
     except HTTPException:
+
         raise
 
     except ValueError as exc:
+
         logger.exception(
             "Dataset structural validation failed."
         )
@@ -1421,8 +1732,9 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
         ) from exc
 
     except Exception as exc:
+
         logger.exception(
-            "Unexpected error while generating dataset metadata."
+            "Unexpected error generating dataset metadata."
         )
 
         raise HTTPException(
@@ -1433,7 +1745,7 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
         ) from exc
 
     # -------------------------------------------------------------------------
-    # Cache result
+    # Cache
     # -------------------------------------------------------------------------
 
     store_cached_metadata(
@@ -1456,3 +1768,334 @@ def get_dataset_metadata() -> DatasetMetadataResponse:
 
     return metadata
 
+
+# =============================================================================
+# DATASET RECORDS
+# =============================================================================
+
+@router.get(
+    "/records",
+    response_model=DatasetRecordsResponse,
+    response_model_exclude_none=False,
+    status_code=status.HTTP_200_OK,
+    summary="Get actual CO₂ dataset records",
+    description=(
+        "Returns paginated records read directly from the deployed "
+        "CO₂ emissions CSV dataset."
+    ),
+)
+def get_dataset_records(
+    page: int = Query(
+        default=1,
+        ge=1,
+        description=(
+            "Page number. Pages start at 1."
+        ),
+    ),
+    page_size: int = Query(
+        default=DEFAULT_PAGE_SIZE,
+        alias="pageSize",
+        ge=1,
+        le=MAX_PAGE_SIZE,
+        description=(
+            "Number of records returned per page."
+        ),
+    ),
+    search: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=MAX_SEARCH_LENGTH,
+        description=(
+            "Optional text search across all dataset columns."
+        ),
+    ),
+) -> DatasetRecordsResponse:
+    """
+    Return actual records from the deployed CSV dataset.
+
+    The endpoint does not contain hardcoded dataset records.
+
+    Pagination
+    ----------
+    page:
+        One-based page number.
+
+    pageSize:
+        Number of records per page.
+
+    search:
+        Optional case-insensitive search across every dataset column.
+
+    Examples
+    --------
+    GET /dataset/records
+
+    GET /dataset/records?page=1&pageSize=25
+
+    GET /dataset/records?page=2&pageSize=25
+
+    GET /dataset/records?search=BMW
+    """
+
+    logger.info(
+        (
+            "Dataset records request | "
+            "page=%d | pageSize=%d | search=%r"
+        ),
+        page,
+        page_size,
+        search,
+    )
+
+    # -------------------------------------------------------------------------
+    # Locate dataset
+    # -------------------------------------------------------------------------
+
+    dataset_path = find_dataset()
+
+    if dataset_path is None:
+
+        logger.error(
+            "CO₂ emissions dataset was not found."
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "The CO₂ emissions dataset could not be found."
+            ),
+        )
+
+    # -------------------------------------------------------------------------
+    # Load actual CSV
+    # -------------------------------------------------------------------------
+
+    dataframe = load_dataset(
+        dataset_path
+    )
+
+    # -------------------------------------------------------------------------
+    # Normalize columns
+    # -------------------------------------------------------------------------
+
+    try:
+
+        dataframe = normalize_dataframe_columns(
+            dataframe
+        )
+
+    except ValueError as exc:
+
+        logger.exception(
+            "Dataset column normalization failed."
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "The CO₂ emissions dataset contains "
+                "invalid or duplicate column names."
+            ),
+        ) from exc
+
+    # -------------------------------------------------------------------------
+    # Empty dataset
+    # -------------------------------------------------------------------------
+
+    total_records_before_filter = int(
+        len(dataframe)
+    )
+
+    if total_records_before_filter == 0:
+
+        return DatasetRecordsResponse(
+
+            datasetName=dataset_path.stem,
+
+            columns=[
+                str(column)
+                for column in dataframe.columns
+            ],
+
+            records=[],
+
+            page=page,
+
+            pageSize=page_size,
+
+            totalRecords=0,
+
+            totalPages=0,
+
+            hasNextPage=False,
+
+            hasPreviousPage=(
+                page > 1
+            ),
+
+            returnedRecords=0,
+        )
+
+    # -------------------------------------------------------------------------
+    # Search
+    # -------------------------------------------------------------------------
+
+    if search is not None:
+
+        normalized_search = (
+            search.strip()
+        )
+
+        if not normalized_search:
+
+            search = None
+
+        else:
+
+            # ---------------------------------------------------------------
+            # Search every dataset column.
+            #
+            # This intentionally does NOT alter the actual dataset.
+            # It only filters the records returned to the frontend.
+            # ---------------------------------------------------------------
+
+            search_mask = pd.Series(
+                False,
+                index=dataframe.index,
+            )
+
+            for column in dataframe.columns:
+
+                column_values = (
+                    dataframe[column]
+                    .astype("string")
+                    .fillna("")
+                )
+
+                search_mask = (
+                    search_mask
+                    | column_values.str.contains(
+                        normalized_search,
+                        case=False,
+                        regex=False,
+                        na=False,
+                    )
+                )
+
+            dataframe = dataframe[
+                search_mask
+            ]
+
+    # -------------------------------------------------------------------------
+    # Filtered total
+    # -------------------------------------------------------------------------
+
+    total_records = int(
+        len(dataframe)
+    )
+
+    # -------------------------------------------------------------------------
+    # Calculate pagination
+    # -------------------------------------------------------------------------
+
+    total_pages = (
+        math.ceil(
+            total_records
+            / page_size
+        )
+        if total_records > 0
+        else 0
+    )
+
+    if total_records > 0 and page > total_pages:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Page {page} does not exist. "
+                f"The dataset contains {total_pages} page(s) "
+                f"at page size {page_size}."
+            ),
+        )
+
+    # -------------------------------------------------------------------------
+    # Slice dataframe
+    # -------------------------------------------------------------------------
+
+    start_index = (
+        (page - 1)
+        * page_size
+    )
+
+    end_index = (
+        start_index
+        + page_size
+    )
+
+    page_dataframe = dataframe.iloc[
+        start_index:end_index
+    ]
+
+    # -------------------------------------------------------------------------
+    # Convert actual rows to JSON-safe records
+    # -------------------------------------------------------------------------
+
+    records = dataframe_to_records(
+        page_dataframe
+    )
+
+    columns = [
+        str(column)
+        for column in dataframe.columns
+    ]
+
+    returned_records = len(
+        records
+    )
+
+    # -------------------------------------------------------------------------
+    # Response
+    # -------------------------------------------------------------------------
+
+    response = DatasetRecordsResponse(
+
+        datasetName=dataset_path.stem,
+
+        columns=columns,
+
+        records=records,
+
+        page=page,
+
+        pageSize=page_size,
+
+        totalRecords=total_records,
+
+        totalPages=total_pages,
+
+        hasNextPage=(
+            total_pages > 0
+            and page < total_pages
+        ),
+
+        hasPreviousPage=(
+            page > 1
+            and total_pages > 0
+        ),
+
+        returnedRecords=returned_records,
+    )
+
+    logger.info(
+        (
+            "Dataset records returned successfully | "
+            "dataset=%s | page=%d/%d | returned=%d | total=%d"
+        ),
+        dataset_path.name,
+        page,
+        total_pages,
+        returned_records,
+        total_records,
+    )
+
+    return response
