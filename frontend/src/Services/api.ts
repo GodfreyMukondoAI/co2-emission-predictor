@@ -10,8 +10,7 @@ import type {
    ENVIRONMENT CONFIGURATION
    ========================================================================== */
 
-const configuredApiUrl =
-  import.meta.env.VITE_API_URL?.trim();
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim();
 
 if (!configuredApiUrl) {
   throw new Error(
@@ -20,6 +19,14 @@ if (!configuredApiUrl) {
   );
 }
 
+/**
+ * Normalized API base URL.
+ *
+ * Example:
+ * VITE_API_URL=https://co2-emission-predictor-ys3q.onrender.com
+ *
+ * Trailing slashes are removed so endpoints can safely be appended.
+ */
 const API_BASE_URL = configuredApiUrl.replace(/\/+$/, "");
 
 /* ==========================================================================
@@ -29,19 +36,13 @@ const API_BASE_URL = configuredApiUrl.replace(/\/+$/, "");
 class ApiError extends Error {
   public readonly status: number;
 
-  constructor(
-    message: string,
-    status: number,
-  ) {
+  constructor(message: string, status: number) {
     super(message);
 
     this.name = "ApiError";
     this.status = status;
 
-    Object.setPrototypeOf(
-      this,
-      ApiError.prototype,
-    );
+    Object.setPrototypeOf(this, ApiError.prototype);
   }
 }
 
@@ -59,6 +60,10 @@ interface ApiErrorResponse {
    HELPERS
    ========================================================================== */
 
+/**
+ * Determines whether a value is a non-null object
+ * that is not an array.
+ */
 function isObject(
   value: unknown,
 ): value is Record<string, unknown> {
@@ -69,6 +74,10 @@ function isObject(
   );
 }
 
+/**
+ * Extracts a useful error message from common
+ * FastAPI / application error response formats.
+ */
 function extractErrorMessage(
   value: unknown,
 ): string | null {
@@ -76,8 +85,7 @@ function extractErrorMessage(
     return null;
   }
 
-  const errorData =
-    value as ApiErrorResponse;
+  const errorData = value as ApiErrorResponse;
 
   if (
     typeof errorData.detail === "string" &&
@@ -103,18 +111,57 @@ function extractErrorMessage(
   return null;
 }
 
+/**
+ * Safely converts a response body into a useful error message.
+ */
+async function extractResponseError(
+  response: Response,
+): Promise<string | null> {
+  try {
+    const contentType =
+      response.headers.get("content-type") ?? "";
+
+    if (
+      !contentType
+        .toLowerCase()
+        .includes("application/json")
+    ) {
+      return null;
+    }
+
+    const errorData: unknown = await response.json();
+
+    return extractErrorMessage(errorData);
+  } catch {
+    return null;
+  }
+}
+
 /* ==========================================================================
    GENERIC API REQUEST
    ========================================================================== */
 
+/**
+ * Generic HTTP request helper used by all prediction API operations.
+ *
+ * IMPORTANT:
+ * This API does not use browser cookies/session credentials.
+ *
+ * Therefore credentials are intentionally NOT included.
+ *
+ * This prevents the browser from requiring:
+ *
+ * Access-Control-Allow-Credentials: true
+ *
+ * from the FastAPI server during cross-origin requests.
+ */
 async function request<T>(
   endpoint: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const normalizedEndpoint =
-    endpoint.startsWith("/")
-      ? endpoint
-      : `/${endpoint}`;
+  const normalizedEndpoint = endpoint.startsWith("/")
+    ? endpoint
+    : `/${endpoint}`;
 
   const url =
     `${API_BASE_URL}${normalizedEndpoint}`;
@@ -130,15 +177,25 @@ async function request<T>(
 
         ...(options.body
           ? {
-              "Content-Type":
-                "application/json",
+              "Content-Type": "application/json",
             }
           : {}),
 
         ...(options.headers ?? {}),
       },
 
-      credentials: "include",
+      /*
+       * Do NOT use:
+       *
+       * credentials: "include"
+       *
+       * The CO₂ prediction API is a public API and does not
+       * require browser cookies or session credentials.
+       *
+       * Omitting this property uses the browser's default
+       * credentials mode ("same-origin"), which does not
+       * send credentials to the cross-origin Render API.
+       */
     });
   } catch (error) {
     console.error(
@@ -161,19 +218,22 @@ async function request<T>(
     let message =
       `Request failed with status ${response.status}.`;
 
-    try {
-      const errorData: unknown =
-        await response.json();
+    const extractedMessage =
+      await extractResponseError(response);
 
-      const extractedMessage =
-        extractErrorMessage(errorData);
-
-      if (extractedMessage) {
-        message = extractedMessage;
-      }
-    } catch {
-      // Keep the default HTTP error message.
+    if (extractedMessage) {
+      message = extractedMessage;
     }
+
+    console.error(
+      "Prediction API HTTP error:",
+      {
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        message,
+      },
+    );
 
     throw new ApiError(
       message,
@@ -213,7 +273,12 @@ async function request<T>(
 
   try {
     return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    console.error(
+      "Prediction API JSON parsing error:",
+      error,
+    );
+
     throw new ApiError(
       "The prediction API returned invalid JSON.",
       response.status,
@@ -225,6 +290,9 @@ async function request<T>(
    API INFORMATION
    ========================================================================== */
 
+/**
+ * Returns basic information about the CO₂ Prediction API.
+ */
 export async function getApiInfo(): Promise<ApiWelcomeResponse> {
   return request<ApiWelcomeResponse>("/");
 }
@@ -233,26 +301,32 @@ export async function getApiInfo(): Promise<ApiWelcomeResponse> {
    HEALTH CHECK
    ========================================================================== */
 
+/**
+ * Checks whether the production prediction API is healthy.
+ */
 export async function checkHealth(): Promise<HealthResponse> {
-  return request<HealthResponse>(
-    "/api/health",
-  );
+  return request<HealthResponse>("/api/health");
 }
 
 /* ==========================================================================
    MODEL INFORMATION
    ========================================================================== */
 
+/**
+ * Returns information about the loaded machine-learning model.
+ */
 export async function getModelInfo(): Promise<ModelInfoResponse> {
-  return request<ModelInfoResponse>(
-    "/api/model",
-  );
+  return request<ModelInfoResponse>("/api/model");
 }
 
 /* ==========================================================================
    CO₂ PREDICTION
    ========================================================================== */
 
+/**
+ * Sends vehicle information to the production ML API
+ * and returns the predicted CO₂ emission.
+ */
 export async function predictCO2(
   payload: PredictionRequest,
 ): Promise<PredictionResponse> {
