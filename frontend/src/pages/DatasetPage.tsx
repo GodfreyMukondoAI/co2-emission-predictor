@@ -1,3 +1,4 @@
+
 /**
  * ============================================================================
  * CO₂ EMISSION PREDICTOR
@@ -7,16 +8,40 @@
  *
  * Production-ready dataset information page.
  *
- * Responsibilities
- * ----------------
- * - Load dataset metadata from FastAPI.
- * - Display real dataset statistics.
- * - Display model information.
- * - Display dataset features.
- * - Display data-quality information.
- * - Support loading, error and refresh states.
- * - Validate API responses before rendering.
- * - Support request cancellation and timeout.
+ * FastAPI is the single source of truth for:
+ * - Dataset metadata
+ * - Dataset statistics
+ * - Feature definitions
+ * - Model information
+ * - Data quality information
+ *
+ * Frontend responsibilities:
+ * - Request dataset metadata
+ * - Validate the runtime API response
+ * - Safely format values
+ * - Handle loading/error/refresh states
+ * - Cancel stale requests
+ * - Enforce request timeout
+ * - Never trust unvalidated API data
+ *
+ * Environment variables:
+ *
+ * VITE_API_URL
+ *   Development:
+ *     http://127.0.0.1:8000
+ *
+ *   Production:
+ *     https://co2-emission-predictor-ys3q.onrender.com
+ *
+ * VITE_DATASET_METADATA_ENDPOINT
+ *   Optional.
+ *   Defaults to:
+ *     /dataset/metadata
+ *
+ * VITE_API_TIMEOUT
+ *   Optional.
+ *   Defaults to:
+ *     30000
  * ============================================================================
  */
 
@@ -38,24 +63,15 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-
 
 /* ============================================================================
    TYPES
 ============================================================================ */
 
-type DatasetFeatureRole =
-  | "Feature"
-  | "Target";
-
-type DatasetStatisticType =
-  | "records"
-  | "engine-size"
-  | "fuel-consumption"
-  | "target";
-
+type DatasetFeatureRole = "Feature" | "Target";
 
 interface DatasetFeature {
   column: string;
@@ -64,14 +80,12 @@ interface DatasetFeature {
   description: string;
 }
 
-
 interface DatasetStatisticResponse {
   label: string;
   value: string;
   description: string;
-  type?: DatasetStatisticType;
+  type?: string;
 }
-
 
 interface DatasetStatistic {
   label: string;
@@ -79,7 +93,6 @@ interface DatasetStatistic {
   description: string;
   icon: LucideIcon;
 }
-
 
 interface DatasetModel {
   name: string;
@@ -89,6 +102,18 @@ interface DatasetModel {
   targetUnit: string;
 }
 
+interface DatasetNumericStatistics {
+  min: number;
+  max: number;
+  mean: number;
+  median: number;
+  std: number;
+}
+
+interface DatasetTargetStatistics
+  extends DatasetNumericStatistics {
+  column: string;
+}
 
 interface DatasetMetadataResponse {
   datasetName: string;
@@ -113,17 +138,10 @@ interface DatasetMetadataResponse {
 
   featureStatistics: Record<
     string,
-    Record<string, number>
+    DatasetNumericStatistics
   >;
 
-  targetStatistics: {
-    column: string;
-    min: number;
-    max: number;
-    mean: number;
-    median: number;
-    std: number;
-  };
+  targetStatistics: DatasetTargetStatistics;
 
   statistics: DatasetStatisticResponse[];
 
@@ -132,52 +150,97 @@ interface DatasetMetadataResponse {
   lastUpdated?: string | null;
 }
 
-
 interface ApiErrorResponse {
   detail?: unknown;
   message?: unknown;
   error?: unknown;
+  code?: unknown;
 }
 
-
 /* ============================================================================
-   CONFIGURATION
+   ENVIRONMENT CONFIGURATION
 ============================================================================ */
 
-const API_BASE_URL = (
-  import.meta.env.VITE_API_URL ??
-  "http://127.0.0.1:8000"
-).replace(/\/+$/, "");
+const API_BASE_URL = normalizeBaseUrl(
+  import.meta.env.VITE_API_URL ||
+    "http://127.0.0.1:8000",
+);
 
+const DATASET_METADATA_PATH =
+  normalizeEndpointPath(
+    import.meta.env
+      .VITE_DATASET_METADATA_ENDPOINT ||
+      "/dataset/metadata",
+  );
 
-const DATASET_METADATA_PATH = (
-  import.meta.env.VITE_DATASET_METADATA_ENDPOINT ??
-  "/dataset/metadata"
-).replace(/^\/+/, "");
-
+const REQUEST_TIMEOUT_MS = parseTimeout(
+  import.meta.env.VITE_API_TIMEOUT ||
+    "30000",
+);
 
 const DATASET_METADATA_ENDPOINT =
-  `${API_BASE_URL}/${DATASET_METADATA_PATH}`;
-
-
-const REQUEST_TIMEOUT_MS = 15_000;
-
-
-const DEFAULT_ERROR_MESSAGE =
-  "Unable to load dataset information from the AI API.";
-
-
-const VALID_STATISTIC_TYPES:
-  readonly DatasetStatisticType[] = [
-    "records",
-    "engine-size",
-    "fuel-consumption",
-    "target",
-  ];
-
+  `${API_BASE_URL}${DATASET_METADATA_PATH}`;
 
 /* ============================================================================
-   TYPE GUARDS
+   ENVIRONMENT HELPERS
+============================================================================ */
+
+function normalizeBaseUrl(
+  value: string,
+): string {
+  return value
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function normalizeEndpointPath(
+  value: string,
+): string {
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return "/dataset/metadata";
+  }
+
+  return normalized.startsWith("/")
+    ? normalized
+    : `/${normalized}`;
+}
+
+function parseTimeout(
+  value: string,
+): number {
+  const timeout = Number(value);
+
+  if (
+    !Number.isFinite(timeout) ||
+    timeout <= 0
+  ) {
+    return 30000;
+  }
+
+  return Math.floor(timeout);
+}
+
+/* ============================================================================
+   DEVELOPMENT DIAGNOSTICS
+============================================================================ */
+
+if (import.meta.env.DEV) {
+  console.debug(
+    "[CO₂ Emission Predictor] Dataset API configuration",
+    {
+      endpoint:
+        DATASET_METADATA_ENDPOINT,
+      timeout: REQUEST_TIMEOUT_MS,
+      environment:
+        import.meta.env.MODE,
+    },
+  );
+}
+
+/* ============================================================================
+   RUNTIME TYPE HELPERS
 ============================================================================ */
 
 function isObject(
@@ -190,7 +253,6 @@ function isObject(
   );
 }
 
-
 function isFiniteNumber(
   value: unknown,
 ): value is number {
@@ -200,19 +262,56 @@ function isFiniteNumber(
   );
 }
 
+function isNonEmptyString(
+  value: unknown,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0
+  );
+}
 
 function isStringArray(
   value: unknown,
 ): value is string[] {
   return (
     Array.isArray(value) &&
-    value.every(
-      (item) =>
-        typeof item === "string",
-    )
+    value.every(isNonEmptyString)
   );
 }
 
+function isNonNegativeInteger(
+  value: unknown,
+): value is number {
+  return (
+    isFiniteNumber(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  );
+}
+
+function isPercentage(
+  value: unknown,
+): value is number {
+  return (
+    isFiniteNumber(value) &&
+    value >= 0 &&
+    value <= 100
+  );
+}
+
+function hasUniqueStrings(
+  values: string[],
+): boolean {
+  return (
+    new Set(values).size ===
+    values.length
+  );
+}
+
+/* ============================================================================
+   FEATURE VALIDATION
+============================================================================ */
 
 function isDatasetFeature(
   value: unknown,
@@ -221,18 +320,24 @@ function isDatasetFeature(
     return false;
   }
 
+  const column = value.column;
+  const role = value.role;
+  const unit = value.unit;
+  const description =
+    value.description;
+
   return (
-    typeof value.column === "string" &&
-    value.column.trim().length > 0 &&
-    (
-      value.role === "Feature" ||
-      value.role === "Target"
-    ) &&
-    typeof value.unit === "string" &&
-    typeof value.description === "string"
+    isNonEmptyString(column) &&
+    (role === "Feature" ||
+      role === "Target") &&
+    typeof unit === "string" &&
+    typeof description === "string"
   );
 }
 
+/* ============================================================================
+   STATISTIC VALIDATION
+============================================================================ */
 
 function isDatasetStatisticResponse(
   value: unknown,
@@ -241,26 +346,98 @@ function isDatasetStatisticResponse(
     return false;
   }
 
-  if (
-    typeof value.label !== "string" ||
-    typeof value.value !== "string" ||
-    typeof value.description !== "string"
-  ) {
-    return false;
-  }
-
-  if (value.type === undefined) {
-    return true;
-  }
+  const label = value.label;
+  const statisticValue =
+    value.value;
+  const description =
+    value.description;
+  const type = value.type;
 
   return (
-    typeof value.type === "string" &&
-    VALID_STATISTIC_TYPES.includes(
-      value.type as DatasetStatisticType,
+    isNonEmptyString(label) &&
+    isNonEmptyString(statisticValue) &&
+    isNonEmptyString(description) &&
+    (
+      type === undefined ||
+      type === null ||
+      isNonEmptyString(type)
     )
   );
 }
 
+/* ============================================================================
+   NUMERIC STATISTICS VALIDATION
+============================================================================ */
+
+function isDatasetNumericStatistics(
+  value: unknown,
+): value is DatasetNumericStatistics {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  const min = value.min;
+  const max = value.max;
+  const mean = value.mean;
+  const median = value.median;
+  const std = value.std;
+
+  return (
+    isFiniteNumber(min) &&
+    isFiniteNumber(max) &&
+    isFiniteNumber(mean) &&
+    isFiniteNumber(median) &&
+    isFiniteNumber(std) &&
+    min <= max &&
+    std >= 0
+  );
+}
+
+/* ============================================================================
+   FEATURE STATISTICS VALIDATION
+============================================================================ */
+
+function isFeatureStatistics(
+  value: unknown,
+): value is Record<
+  string,
+  DatasetNumericStatistics
+> {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  return Object.entries(value).every(
+    ([column, statistics]) =>
+      isNonEmptyString(column) &&
+      isDatasetNumericStatistics(
+        statistics,
+      ),
+  );
+}
+
+/* ============================================================================
+   TARGET STATISTICS VALIDATION
+============================================================================ */
+
+function isTargetStatistics(
+  value: unknown,
+): value is DatasetTargetStatistics {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  const column = value.column;
+
+  return (
+    isNonEmptyString(column) &&
+    isDatasetNumericStatistics(value)
+  );
+}
+
+/* ============================================================================
+   MODEL VALIDATION
+============================================================================ */
 
 function isDatasetModel(
   value: unknown,
@@ -269,47 +446,27 @@ function isDatasetModel(
     return false;
   }
 
+  const name = value.name;
+  const description =
+    value.description;
+  const features = value.features;
+  const target = value.target;
+  const targetUnit =
+    value.targetUnit;
+
   return (
-    typeof value.name === "string" &&
-    value.name.trim().length > 0 &&
-    typeof value.description === "string" &&
-    value.description.trim().length > 0 &&
-    isStringArray(value.features) &&
-    value.features.length > 0 &&
-    typeof value.target === "string" &&
-    value.target.trim().length > 0 &&
-    typeof value.targetUnit === "string" &&
-    value.targetUnit.trim().length > 0
+    isNonEmptyString(name) &&
+    isNonEmptyString(description) &&
+    isStringArray(features) &&
+    features.length > 0 &&
+    isNonEmptyString(target) &&
+    isNonEmptyString(targetUnit)
   );
 }
 
-
-function isStatisticsObject(
-  value: unknown,
-): value is Record<
-  string,
-  Record<string, number>
-> {
-  if (!isObject(value)) {
-    return false;
-  }
-
-  return Object.values(value).every(
-    (statistics) => {
-      if (!isObject(statistics)) {
-        return false;
-      }
-
-      return Object.values(
-        statistics,
-      ).every(
-        (numberValue) =>
-          isFiniteNumber(numberValue),
-      );
-    },
-  );
-}
-
+/* ============================================================================
+   FULL DATASET VALIDATION
+============================================================================ */
 
 function isDatasetMetadataResponse(
   value: unknown,
@@ -318,120 +475,453 @@ function isDatasetMetadataResponse(
     return false;
   }
 
+  /*
+   * --------------------------------------------------------------------------
+   * Basic metadata
+   * --------------------------------------------------------------------------
+   */
+
+  const datasetName =
+    value.datasetName;
+
+  const title = value.title;
+
+  const description =
+    value.description;
+
   if (
-    typeof value.datasetName !== "string" ||
-    typeof value.title !== "string" ||
-    typeof value.description !== "string"
+    !isNonEmptyString(datasetName) ||
+    !isNonEmptyString(title) ||
+    typeof description !== "string"
   ) {
     return false;
   }
 
-  const numericFields = [
-    "recordCount",
-    "columnCount",
-    "missingValues",
-    "validRecordCount",
-    "invalidRecordCount",
-    "featureCount",
-    "targetCount",
-    "validationPercentage",
-  ];
+  /*
+   * --------------------------------------------------------------------------
+   * Numeric counts
+   * --------------------------------------------------------------------------
+   *
+   * Explicitly narrow every value here.
+   * This prevents TypeScript from retaining `unknown` later in the
+   * integrity checks.
+   */
 
-  for (const field of numericFields) {
-    if (!isFiniteNumber(value[field])) {
-      return false;
-    }
-  }
+  const recordCount =
+    value.recordCount;
+
+  const columnCount =
+    value.columnCount;
+
+  const missingValues =
+    value.missingValues;
+
+  const validRecordCount =
+    value.validRecordCount;
+
+  const invalidRecordCount =
+    value.invalidRecordCount;
+
+  const featureCount =
+    value.featureCount;
+
+  const targetCount =
+    value.targetCount;
 
   if (
-    !Array.isArray(value.columnNames) ||
-    !value.columnNames.every(
-      (column) =>
-        typeof column === "string",
+    !isNonNegativeInteger(
+      recordCount,
+    ) ||
+    !isNonNegativeInteger(
+      columnCount,
+    ) ||
+    !isNonNegativeInteger(
+      missingValues,
+    ) ||
+    !isNonNegativeInteger(
+      validRecordCount,
+    ) ||
+    !isNonNegativeInteger(
+      invalidRecordCount,
+    ) ||
+    !isNonNegativeInteger(
+      featureCount,
+    ) ||
+    !isNonNegativeInteger(
+      targetCount,
     )
   ) {
     return false;
   }
 
+  /*
+   * --------------------------------------------------------------------------
+   * Validation percentage
+   * --------------------------------------------------------------------------
+   */
+
+  const validationPercentage =
+    value.validationPercentage;
+
   if (
-    !Array.isArray(value.features) ||
-    !value.features.every(
-      isDatasetFeature,
+    !isPercentage(
+      validationPercentage,
     )
   ) {
     return false;
   }
 
+  /*
+   * --------------------------------------------------------------------------
+   * Column names
+   * --------------------------------------------------------------------------
+   */
+
+  const columnNames =
+    value.columnNames;
+
   if (
-    !Array.isArray(value.statistics) ||
-    !value.statistics.every(
+    !isStringArray(columnNames) ||
+    !hasUniqueStrings(columnNames)
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Features
+   * --------------------------------------------------------------------------
+   */
+
+  const features =
+    value.features;
+
+  if (
+    !Array.isArray(features) ||
+    !features.every(isDatasetFeature)
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Statistics
+   * --------------------------------------------------------------------------
+   */
+
+  const statistics =
+    value.statistics;
+
+  if (
+    !Array.isArray(statistics) ||
+    !statistics.every(
       isDatasetStatisticResponse,
     )
   ) {
     return false;
   }
 
+  /*
+   * --------------------------------------------------------------------------
+   * Feature statistics
+   * --------------------------------------------------------------------------
+   */
+
+  const featureStatistics =
+    value.featureStatistics;
+
   if (
-    !isStatisticsObject(
-      value.featureStatistics,
+    !isFeatureStatistics(
+      featureStatistics,
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Target statistics
+   * --------------------------------------------------------------------------
+   */
+
+  const targetStatistics =
+    value.targetStatistics;
+
+  if (
+    !isTargetStatistics(
+      targetStatistics,
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Model
+   * --------------------------------------------------------------------------
+   */
+
+  const model = value.model;
+
+  if (!isDatasetModel(model)) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Last updated
+   * --------------------------------------------------------------------------
+   */
+
+  const lastUpdated =
+    value.lastUpdated;
+
+  if (
+    lastUpdated !== undefined &&
+    lastUpdated !== null &&
+    !isNonEmptyString(lastUpdated)
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Record integrity
+   * --------------------------------------------------------------------------
+   */
+
+  if (
+    validRecordCount +
+      invalidRecordCount !==
+    recordCount
+  ) {
+    return false;
+  }
+
+  if (recordCount <= 0) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Column integrity
+   * --------------------------------------------------------------------------
+   */
+
+  if (columnCount !== columnNames.length) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Feature integrity
+   * --------------------------------------------------------------------------
+   */
+
+  if (
+    featureCount +
+      targetCount !==
+    features.length
+  ) {
+    return false;
+  }
+
+  if (targetCount !== 1) {
+    return false;
+  }
+
+  if (
+    featureCount !==
+    model.features.length
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Feature metadata integrity
+   * --------------------------------------------------------------------------
+   */
+
+  const featureColumns =
+    features
+      .filter(
+        (feature) =>
+          feature.role ===
+          "Feature",
+      )
+      .map(
+        (feature) =>
+          feature.column,
+      );
+
+  const targetColumns =
+    features
+      .filter(
+        (feature) =>
+          feature.role ===
+          "Target",
+      )
+      .map(
+        (feature) =>
+          feature.column,
+      );
+
+  if (
+    featureColumns.length !==
+    featureCount
+  ) {
+    return false;
+  }
+
+  if (
+    targetColumns.length !==
+    targetCount
+  ) {
+    return false;
+  }
+
+  if (
+    !hasUniqueStrings(
+      features.map(
+        (feature) =>
+          feature.column,
+      ),
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Model integrity
+   * --------------------------------------------------------------------------
+   */
+
+  if (
+    !hasUniqueStrings(
+      model.features,
     )
   ) {
     return false;
   }
 
   if (
-    !isObject(value.targetStatistics)
+    !model.features.every(
+      (feature) =>
+        featureColumns.includes(
+          feature,
+        ),
+    )
   ) {
     return false;
   }
 
   if (
-    typeof value.targetStatistics.column !==
-    "string"
+    !columnNames.includes(
+      model.target,
+    )
   ) {
     return false;
   }
 
+  if (
+    model.target !==
+    targetStatistics.column
+  ) {
+    return false;
+  }
+
+  if (
+    !targetColumns.includes(
+      model.target,
+    )
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Feature statistics integrity
+   * --------------------------------------------------------------------------
+   */
+
   for (
-    const field of [
-      "min",
-      "max",
-      "mean",
-      "median",
-      "std",
-    ]
+    const feature of model.features
   ) {
     if (
-      !isFiniteNumber(
-        value.targetStatistics[field],
+      !Object.prototype.hasOwnProperty.call(
+        featureStatistics,
+        feature,
       )
     ) {
       return false;
     }
   }
 
-  if (!isDatasetModel(value.model)) {
-    return false;
-  }
+  /*
+   * --------------------------------------------------------------------------
+   * Target statistics integrity
+   * --------------------------------------------------------------------------
+   */
 
   if (
-    value.lastUpdated !== undefined &&
-    value.lastUpdated !== null &&
-    typeof value.lastUpdated !== "string"
+    !featureStatistics[
+      model.features[0]
+    ]
   ) {
     return false;
   }
 
+  /*
+   * --------------------------------------------------------------------------
+   * Missing values integrity
+   * --------------------------------------------------------------------------
+   */
+
+  if (
+    missingValues >
+    recordCount * columnCount
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Validation percentage integrity
+   * --------------------------------------------------------------------------
+   */
+
+  const calculatedPercentage =
+    (
+      validRecordCount /
+      recordCount
+    ) * 100;
+
+  if (
+    Math.abs(
+      calculatedPercentage -
+        validationPercentage,
+    ) > 0.1
+  ) {
+    return false;
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Everything passed.
+   * --------------------------------------------------------------------------
+   */
+
   return true;
 }
 
-
 /* ============================================================================
-   HELPERS
+   ICON RESOLUTION
 ============================================================================ */
 
 function getStatisticIcon(
-  type?: DatasetStatisticType,
+  type?: string,
 ): LucideIcon {
   switch (type) {
     case "records":
@@ -451,6 +941,9 @@ function getStatisticIcon(
   }
 }
 
+/* ============================================================================
+   FORMATTERS
+============================================================================ */
 
 function formatNumber(
   value: number,
@@ -467,22 +960,21 @@ function formatNumber(
   ).format(value);
 }
 
-
 function formatPercentage(
   value: number,
 ): string {
   if (!Number.isFinite(value)) {
-    return "0.0%";
+    return "—";
   }
 
-  const safeValue = Math.min(
-    Math.max(value, 0),
-    100,
-  );
+  const safeValue =
+    Math.min(
+      Math.max(value, 0),
+      100,
+    );
 
   return `${safeValue.toFixed(1)}%`;
 }
-
 
 function formatDate(
   value?: string | null,
@@ -493,136 +985,176 @@ function formatDate(
 
   const date = new Date(value);
 
-  if (
-    Number.isNaN(
-      date.getTime(),
-    )
-  ) {
+  if (Number.isNaN(date.getTime())) {
     return null;
   }
 
-  return new Intl.DateTimeFormat(
-    undefined,
-    {
-      dateStyle: "medium",
-      timeStyle: "short",
-    },
-  ).format(date);
+  try {
+    return new Intl.DateTimeFormat(
+      undefined,
+      {
+        dateStyle: "medium",
+        timeStyle: "short",
+      },
+    ).format(date);
+  } catch {
+    return null;
+  }
 }
 
+/* ============================================================================
+   API ERROR HANDLING
+============================================================================ */
 
 function getApiErrorMessage(
   body: unknown,
-  responseStatus: number,
+  status: number,
 ): string {
   if (isObject(body)) {
     const errorBody =
       body as ApiErrorResponse;
 
-    if (
-      typeof errorBody.detail ===
-        "string" &&
-      errorBody.detail.trim()
-        .length > 0
-    ) {
-      return errorBody.detail;
-    }
+    const candidates = [
+      errorBody.detail,
+      errorBody.message,
+      errorBody.error,
+    ];
 
-    if (
-      typeof errorBody.message ===
-        "string" &&
-      errorBody.message.trim()
-        .length > 0
+    for (
+      const candidate of candidates
     ) {
-      return errorBody.message;
-    }
-
-    if (
-      typeof errorBody.error ===
-        "string" &&
-      errorBody.error.trim()
-        .length > 0
-    ) {
-      return errorBody.error;
+      if (
+        isNonEmptyString(candidate)
+      ) {
+        return candidate;
+      }
     }
   }
 
-  switch (responseStatus) {
+  switch (status) {
     case 400:
-      return (
-        "The dataset metadata request was invalid."
-      );
+      return "The dataset metadata request was invalid.";
 
     case 401:
-      return (
-        "Authentication is required to access dataset metadata."
-      );
+      return "Authentication is required to access dataset metadata.";
 
     case 403:
-      return (
-        "You are not authorized to access dataset metadata."
-      );
+      return "You are not authorized to access dataset metadata.";
 
     case 404:
-      return (
-        "The dataset metadata endpoint was not found on the AI API."
-      );
+      return "The dataset metadata endpoint was not found.";
+
+    case 408:
+      return "The dataset metadata request timed out.";
+
+    case 429:
+      return "Too many requests were sent to the API. Please try again shortly.";
 
     case 500:
-      return (
-        "The AI API encountered an internal server error."
-      );
+      return "The machine-learning API encountered an internal server error.";
 
     case 502:
     case 503:
     case 504:
-      return (
-        "The AI API is currently unavailable."
-      );
+      return "The machine-learning API is temporarily unavailable. Please try again shortly.";
 
     default:
-      return (
-        `Dataset API request failed with HTTP ${responseStatus}.`
-      );
+      return `Dataset API request failed with HTTP ${status}.`;
   }
 }
 
+/* ============================================================================
+   ERROR TYPES
+============================================================================ */
+
+class DatasetApiError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+
+  constructor(
+    message: string,
+    options?: {
+      status?: number;
+      code?: string;
+    },
+  ) {
+    super(message);
+
+    this.name =
+      "DatasetApiError";
+
+    this.status =
+      options?.status;
+
+    this.code =
+      options?.code;
+  }
+}
+
+class DatasetApiTimeoutError
+  extends DatasetApiError {
+  constructor() {
+    super(
+      "The dataset API request timed out. Please try again.",
+      {
+        code:
+          "REQUEST_TIMEOUT",
+      },
+    );
+
+    this.name =
+      "DatasetApiTimeoutError";
+  }
+}
+
+/* ============================================================================
+   ABORT HELPERS
+============================================================================ */
+
+function isAbortError(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof DOMException &&
+    error.name === "AbortError"
+  );
+}
 
 /* ============================================================================
    API CLIENT
 ============================================================================ */
 
 async function fetchDatasetMetadata(
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<DatasetMetadataResponse> {
-  const controller =
+  const timeoutController =
     new AbortController();
+
+  let timedOut = false;
 
   const timeoutId =
     window.setTimeout(
       () => {
-        controller.abort();
+        timedOut = true;
+        timeoutController.abort();
       },
       REQUEST_TIMEOUT_MS,
     );
 
-  const abortHandler =
-    () => {
-      controller.abort();
-    };
+  const abortHandler = () => {
+    timeoutController.abort();
+  };
 
-  if (signal) {
-    if (signal.aborted) {
-      controller.abort();
-    } else {
-      signal.addEventListener(
-        "abort",
-        abortHandler,
-        {
-          once: true,
-        },
-      );
-    }
+  if (signal.aborted) {
+    timeoutController.abort();
+  } else {
+    signal.addEventListener(
+      "abort",
+      abortHandler,
+      {
+        once: true,
+      },
+    );
   }
 
   try {
@@ -637,44 +1169,84 @@ async function fetchDatasetMetadata(
               "application/json",
           },
 
-          credentials: "include",
+          credentials: "omit",
 
           cache: "no-store",
 
+          redirect: "error",
+
           signal:
-            controller.signal,
+            timeoutController.signal,
         },
       );
 
-    let responseBody:
-      unknown = null;
-
     const contentType =
-      response.headers.get(
-        "content-type",
-      ) ?? "";
+      (
+        response.headers.get(
+          "content-type",
+        ) ?? ""
+      ).toLowerCase();
+
+    let responseBody: unknown =
+      null;
 
     if (
-      contentType
-        .toLowerCase()
-        .includes(
-          "application/json",
-        )
+      contentType.includes(
+        "application/json",
+      )
     ) {
       try {
         responseBody =
           await response.json();
       } catch {
-        responseBody = null;
+        throw new DatasetApiError(
+          "The dataset API returned invalid JSON.",
+          {
+            status:
+              response.status,
+            code:
+              "INVALID_JSON",
+          },
+        );
       }
     }
 
     if (!response.ok) {
-      throw new Error(
+      const responseCode =
+        isObject(
+          responseBody,
+        ) &&
+        isNonEmptyString(
+          responseBody.code,
+        )
+          ? responseBody.code
+          : undefined;
+
+      throw new DatasetApiError(
         getApiErrorMessage(
           responseBody,
           response.status,
         ),
+        {
+          status:
+            response.status,
+          code:
+            responseCode,
+        },
+      );
+    }
+
+    if (
+      !contentType.includes(
+        "application/json",
+      )
+    ) {
+      throw new DatasetApiError(
+        "The dataset API returned an unsupported response format.",
+        {
+          code:
+            "INVALID_CONTENT_TYPE",
+        },
       );
     }
 
@@ -683,22 +1255,35 @@ async function fetchDatasetMetadata(
         responseBody,
       )
     ) {
-      console.error(
-        "Invalid dataset metadata response:",
-        responseBody,
-      );
+      if (import.meta.env.DEV) {
+        console.error(
+          "[DatasetPage] Invalid API response:",
+          responseBody,
+        );
+      }
 
-      throw new Error(
-        "The dataset API returned an invalid metadata structure.",
+      throw new DatasetApiError(
+        "The dataset API returned invalid dataset metadata.",
+        {
+          code:
+            "INVALID_RESPONSE",
+        },
       );
     }
 
     return responseBody;
-
   } catch (error) {
+    if (timedOut) {
+      throw new DatasetApiTimeoutError();
+    }
+
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     if (
-      error instanceof DOMException &&
-      error.name === "AbortError"
+      error instanceof
+      DatasetApiError
     ) {
       throw error;
     }
@@ -706,27 +1291,33 @@ async function fetchDatasetMetadata(
     if (
       error instanceof TypeError
     ) {
-      throw new Error(
-        "Unable to connect to the FastAPI machine-learning backend. Check that the API is running and CORS is configured correctly.",
+      throw new DatasetApiError(
+        "Unable to connect to the FastAPI machine-learning backend. Check the API URL, server availability and CORS configuration.",
+        {
+          code:
+            "NETWORK_ERROR",
+        },
       );
     }
 
-    throw error;
-
+    throw new DatasetApiError(
+      "An unexpected error occurred while loading dataset metadata.",
+      {
+        code:
+          "UNKNOWN_ERROR",
+      },
+    );
   } finally {
     window.clearTimeout(
       timeoutId,
     );
 
-    if (signal) {
-      signal.removeEventListener(
-        "abort",
-        abortHandler,
-      );
-    }
+    signal.removeEventListener(
+      "abort",
+      abortHandler,
+    );
   }
 }
-
 
 /* ============================================================================
    LOADING COMPONENT
@@ -789,7 +1380,6 @@ function DatasetPageSkeleton() {
   );
 }
 
-
 /* ============================================================================
    ERROR COMPONENT
 ============================================================================ */
@@ -799,7 +1389,6 @@ interface DatasetErrorStateProps {
   refreshing: boolean;
   onRetry: () => void;
 }
-
 
 function DatasetErrorState({
   message,
@@ -852,6 +1441,61 @@ function DatasetErrorState({
   );
 }
 
+/* ============================================================================
+   REFRESH ERROR
+============================================================================ */
+
+interface RefreshErrorProps {
+  message: string;
+  onRetry: () => void;
+  refreshing: boolean;
+}
+
+function RefreshError({
+  message,
+  onRetry,
+  refreshing,
+}: RefreshErrorProps) {
+  return (
+    <div
+      role="alert"
+      className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3"
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          <AlertCircle
+            size={18}
+            className="mt-0.5 shrink-0 text-amber-600"
+            aria-hidden="true"
+          />
+
+          <p className="text-sm text-amber-800">
+            {message}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={refreshing}
+          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <RefreshCw
+            size={14}
+            className={
+              refreshing
+                ? "animate-spin"
+                : undefined
+            }
+            aria-hidden="true"
+          />
+
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /* ============================================================================
    MAIN COMPONENT
@@ -861,93 +1505,114 @@ export default function DatasetPage() {
   const [
     dataset,
     setDataset,
-  ] = useState<
-    DatasetMetadataResponse | null
-  >(null);
+  ] =
+    useState<DatasetMetadataResponse | null>(
+      null,
+    );
 
-  const [
-    loading,
-    setLoading,
-  ] = useState(true);
+  const [loading, setLoading] =
+    useState(true);
 
   const [
     refreshing,
     setRefreshing,
   ] = useState(false);
 
-  const [
-    error,
-    setError,
-  ] = useState<string | null>(null);
+  const [error, setError] =
+    useState<string | null>(null);
 
+  const activeRequestRef =
+    useRef<AbortController | null>(
+      null,
+    );
 
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      LOAD DATASET
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const loadDataset =
     useCallback(
       async (
         options?: {
           refresh?: boolean;
-          signal?: AbortSignal;
         },
       ): Promise<void> => {
         const refresh =
-          options?.refresh ?? false;
+          options?.refresh ??
+          false;
 
-        const signal =
-          options?.signal;
+        activeRequestRef.current?.abort();
+
+        const controller =
+          new AbortController();
+
+        activeRequestRef.current =
+          controller;
+
+        if (refresh) {
+          setRefreshing(true);
+        } else {
+          setLoading(true);
+        }
+
+        setError(null);
 
         try {
-          if (refresh) {
-            setRefreshing(true);
-          } else {
-            setLoading(true);
-          }
-
-          setError(null);
-
           const data =
             await fetchDatasetMetadata(
-              signal,
+              controller.signal,
             );
 
           if (
-            !signal?.aborted
+            controller.signal.aborted
           ) {
-            setDataset(data);
+            return;
           }
 
+          if (
+            activeRequestRef.current !==
+            controller
+          ) {
+            return;
+          }
+
+          setDataset(data);
         } catch (err) {
           if (
-            err instanceof DOMException &&
-            err.name === "AbortError"
+            isAbortError(err) ||
+            controller.signal.aborted
           ) {
             return;
           }
 
           if (
-            signal?.aborted
+            activeRequestRef.current !==
+            controller
           ) {
             return;
           }
 
-          console.error(
-            "Failed to load dataset metadata:",
-            err,
-          );
-
-          setError(
+          const message =
             err instanceof Error
               ? err.message
-              : DEFAULT_ERROR_MESSAGE,
-          );
+              : "Unable to load dataset information from the AI API.";
 
+          if (import.meta.env.DEV) {
+            console.error(
+              "[DatasetPage] Dataset request failed:",
+              err,
+            );
+          }
+
+          setError(message);
         } finally {
           if (
-            !signal?.aborted
+            activeRequestRef.current ===
+            controller
           ) {
+            activeRequestRef.current =
+              null;
+
             setLoading(false);
             setRefreshing(false);
           }
@@ -956,29 +1621,24 @@ export default function DatasetPage() {
       [],
     );
 
-
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      INITIAL LOAD
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   useEffect(() => {
-    const controller =
-      new AbortController();
-
-    void loadDataset({
-      signal:
-        controller.signal,
-    });
+    void loadDataset();
 
     return () => {
-      controller.abort();
+      activeRequestRef.current?.abort();
+
+      activeRequestRef.current =
+        null;
     };
   }, [loadDataset]);
 
-
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      STATISTICS
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const statistics =
     useMemo<DatasetStatistic[]>(
@@ -991,13 +1651,10 @@ export default function DatasetPage() {
           (statistic) => ({
             label:
               statistic.label,
-
             value:
               statistic.value,
-
             description:
               statistic.description,
-
             icon:
               getStatisticIcon(
                 statistic.type,
@@ -1008,10 +1665,9 @@ export default function DatasetPage() {
       [dataset],
     );
 
-
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      VALIDATION
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const validationPercentage =
     useMemo(
@@ -1031,10 +1687,9 @@ export default function DatasetPage() {
       [dataset],
     );
 
-
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      LAST UPDATED
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const formattedLastUpdated =
     useMemo(
@@ -1045,47 +1700,41 @@ export default function DatasetPage() {
       [dataset?.lastUpdated],
     );
 
-
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      REFRESH
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const handleRefresh =
-    useCallback(
-      () => {
-        void loadDataset({
-          refresh: true,
-        });
-      },
-      [loadDataset],
-    );
+    useCallback(() => {
+      void loadDataset({
+        refresh: true,
+      });
+    }, [loadDataset]);
 
+  /* ==========================================================================
+     INITIAL LOADING
+  ========================================================================== */
 
-  /* --------------------------------------------------------------------------
-     LOADING
-  -------------------------------------------------------------------------- */
-
-  if (loading) {
+  if (
+    loading &&
+    !dataset
+  ) {
     return (
       <DatasetPageSkeleton />
     );
   }
 
-
-  /* --------------------------------------------------------------------------
-     ERROR
-  -------------------------------------------------------------------------- */
+  /* ==========================================================================
+     INITIAL ERROR
+  ========================================================================== */
 
   if (
-    error ||
+    error &&
     !dataset
   ) {
     return (
       <DatasetErrorState
-        message={
-          error ??
-          DEFAULT_ERROR_MESSAGE
-        }
+        message={error}
         refreshing={
           refreshing
         }
@@ -1096,17 +1745,31 @@ export default function DatasetPage() {
     );
   }
 
+  if (!dataset) {
+    return (
+      <DatasetErrorState
+        message="Dataset information is currently unavailable."
+        refreshing={
+          refreshing
+        }
+        onRetry={
+          handleRefresh
+        }
+      />
+    );
+  }
 
-  /* --------------------------------------------------------------------------
+  /* ==========================================================================
      SAFE VALUES
-  -------------------------------------------------------------------------- */
+  ========================================================================== */
 
   const hasFeatures =
-    dataset.features.length > 0;
+    dataset.features.length >
+    0;
 
   const hasStatistics =
-    statistics.length > 0;
-
+    statistics.length >
+    0;
 
   /* ==========================================================================
      PAGE
@@ -1114,13 +1777,35 @@ export default function DatasetPage() {
 
   return (
     <div className="space-y-8 pb-10">
+      {error && (
+        <RefreshError
+          message={error}
+          onRetry={
+            handleRefresh
+          }
+          refreshing={
+            refreshing
+          }
+        />
+      )}
+
+      <div
+        className="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {refreshing
+          ? "Refreshing dataset information."
+          : error
+            ? `Dataset refresh failed. ${error}`
+            : "Dataset information loaded."}
+      </div>
 
       {/* ======================================================================
           HEADER
       ====================================================================== */}
 
       <header className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-
         <div
           className="absolute -right-20 -top-20 h-48 w-48 rounded-full bg-emerald-100/60 blur-3xl"
           aria-hidden="true"
@@ -1132,20 +1817,14 @@ export default function DatasetPage() {
         />
 
         <div className="relative">
-
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-
             <div className="min-w-0">
-
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-emerald-700">
-
                 <Database
                   size={14}
                   aria-hidden="true"
                 />
-
                 Dataset
-
               </div>
 
               <h1 className="mt-4 break-words text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">
@@ -1155,16 +1834,23 @@ export default function DatasetPage() {
               <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-500 sm:text-base">
                 {dataset.description}
               </p>
-
             </div>
 
             <button
               type="button"
-              onClick={handleRefresh}
-              disabled={refreshing}
+              onClick={
+                handleRefresh
+              }
+              disabled={
+                refreshing
+              }
+              aria-label={
+                refreshing
+                  ? "Refreshing dataset information"
+                  : "Refresh dataset information"
+              }
               className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
             >
-
               <RefreshCw
                 size={16}
                 className={
@@ -1178,16 +1864,11 @@ export default function DatasetPage() {
               {refreshing
                 ? "Refreshing..."
                 : "Refresh"}
-
             </button>
-
           </div>
 
-
           <div className="mt-6 flex flex-wrap items-center gap-3">
-
             <div className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-
               <CheckCircle2
                 size={15}
                 className="text-emerald-600"
@@ -1198,12 +1879,9 @@ export default function DatasetPage() {
                 dataset.validRecordCount,
               )}{" "}
               valid records
-
             </div>
 
-
             <div className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-
               <BarChart3
                 size={15}
                 className="text-emerald-600"
@@ -1214,15 +1892,13 @@ export default function DatasetPage() {
                 dataset.featureCount,
               )}{" "}
               input{" "}
-              {dataset.featureCount === 1
+              {dataset.featureCount ===
+              1
                 ? "feature"
                 : "features"}
-
             </div>
 
-
             <div className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
-
               <Target
                 size={15}
                 className="text-emerald-600"
@@ -1233,27 +1909,21 @@ export default function DatasetPage() {
                 dataset.targetCount,
               )}{" "}
               prediction{" "}
-              {dataset.targetCount === 1
+              {dataset.targetCount ===
+              1
                 ? "target"
                 : "targets"}
-
             </div>
-
           </div>
-
         </div>
-
       </header>
 
-
       {/* ======================================================================
-          OVERVIEW
+          DATASET OVERVIEW
       ====================================================================== */}
 
       <section aria-labelledby="dataset-overview-heading">
-
         <div className="mb-4">
-
           <h2
             id="dataset-overview-heading"
             className="text-lg font-bold text-slate-950"
@@ -1264,14 +1934,10 @@ export default function DatasetPage() {
           <p className="mt-1 text-sm text-slate-500">
             Summary of the data available to the machine-learning pipeline.
           </p>
-
         </div>
 
-
         {!hasStatistics ? (
-
           <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-
             <Database
               size={32}
               className="mx-auto text-slate-300"
@@ -1281,16 +1947,14 @@ export default function DatasetPage() {
             <p className="mt-3 text-sm font-medium text-slate-600">
               No dataset statistics are currently available.
             </p>
-
           </div>
-
         ) : (
-
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-
             {statistics.map(
-              (statistic, index) => {
-
+              (
+                statistic,
+                index,
+              ) => {
                 const Icon =
                   statistic.icon;
 
@@ -1299,69 +1963,57 @@ export default function DatasetPage() {
                     key={`${statistic.label}-${index}`}
                     className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-md"
                   >
-
                     <div className="flex items-start justify-between gap-4">
-
                       <div className="min-w-0">
-
                         <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                          {statistic.label}
+                          {
+                            statistic.label
+                          }
                         </p>
 
                         <p className="mt-3 break-words text-2xl font-bold tracking-tight text-slate-950">
-                          {statistic.value}
+                          {
+                            statistic.value
+                          }
                         </p>
-
                       </div>
 
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 transition group-hover:bg-emerald-100">
-
                         <Icon
                           size={20}
                           aria-hidden="true"
                         />
-
                       </div>
-
                     </div>
 
                     <p className="mt-3 text-xs leading-5 text-slate-500">
-                      {statistic.description}
+                      {
+                        statistic.description
+                      }
                     </p>
-
                   </article>
                 );
               },
             )}
-
           </div>
-
         )}
-
       </section>
-
 
       {/* ======================================================================
           DATASET INFORMATION
       ====================================================================== */}
 
       <section className="grid gap-6 md:grid-cols-3">
-
         <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-
           <div className="flex items-center gap-3">
-
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
-
               <Rows3
                 size={20}
                 aria-hidden="true"
               />
-
             </div>
 
             <div>
-
               <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
                 Records
               </p>
@@ -1371,29 +2023,20 @@ export default function DatasetPage() {
                   dataset.recordCount,
                 )}
               </p>
-
             </div>
-
           </div>
-
         </article>
 
-
         <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-
           <div className="flex items-center gap-3">
-
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
-
               <Database
                 size={20}
                 aria-hidden="true"
               />
-
             </div>
 
             <div>
-
               <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
                 Columns
               </p>
@@ -1403,29 +2046,20 @@ export default function DatasetPage() {
                   dataset.columnCount,
                 )}
               </p>
-
             </div>
-
           </div>
-
         </article>
 
-
         <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-
           <div className="flex items-center gap-3">
-
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-50 text-amber-600">
-
               <Info
                 size={20}
                 aria-hidden="true"
               />
-
             </div>
 
             <div>
-
               <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
                 Missing Values
               </p>
@@ -1435,40 +2069,29 @@ export default function DatasetPage() {
                   dataset.missingValues,
                 )}
               </p>
-
             </div>
-
           </div>
-
         </article>
-
       </section>
 
-
       {/* ======================================================================
-          FEATURES
+          DATASET FEATURES
       ====================================================================== */}
 
       <section
         aria-labelledby="dataset-features-heading"
         className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
       >
-
         <div className="border-b border-slate-200 p-6 sm:p-7">
-
           <div className="flex items-start gap-4">
-
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
-
               <Database
                 size={21}
                 aria-hidden="true"
               />
-
             </div>
 
             <div className="min-w-0">
-
               <h2
                 id="dataset-features-heading"
                 className="font-bold text-slate-950"
@@ -1477,28 +2100,21 @@ export default function DatasetPage() {
               </h2>
 
               <p className="mt-1 text-sm leading-6 text-slate-500">
-
                 Variables used by{" "}
-
                 <strong className="font-semibold text-slate-700">
-                  {dataset.model.name}
+                  {
+                    dataset.model
+                      .name
+                  }
                 </strong>
-
                 .
-
               </p>
-
             </div>
-
           </div>
-
         </div>
 
-
         {!hasFeatures ? (
-
           <div className="p-10 text-center">
-
             <Database
               size={32}
               className="mx-auto text-slate-300"
@@ -1508,23 +2124,19 @@ export default function DatasetPage() {
             <p className="mt-3 text-sm font-medium text-slate-600">
               No dataset features are currently available.
             </p>
-
           </div>
-
         ) : (
-
           <div className="overflow-x-auto">
-
             <table className="min-w-[760px] w-full text-left text-sm">
-
               <caption className="sr-only">
-                {dataset.datasetName} dataset features
+                {
+                  dataset.datasetName
+                }{" "}
+                dataset features
               </caption>
 
               <thead className="border-b border-slate-200 bg-slate-50">
-
                 <tr>
-
                   <th
                     scope="col"
                     className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500"
@@ -1552,72 +2164,59 @@ export default function DatasetPage() {
                   >
                     Description
                   </th>
-
                 </tr>
-
               </thead>
 
-
               <tbody className="divide-y divide-slate-100">
-
                 {dataset.features.map(
                   (feature) => (
                     <tr
                       key={`${feature.role}-${feature.column}`}
                       className="transition hover:bg-slate-50/80"
                     >
-
                       <td className="px-6 py-5">
-
                         <code className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-800">
-                          {feature.column}
+                          {
+                            feature.column
+                          }
                         </code>
-
                       </td>
 
-
                       <td className="px-6 py-5">
-
                         <span
                           className={
-                            feature.role === "Target"
+                            feature.role ===
+                            "Target"
                               ? "inline-flex items-center rounded-full bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700"
                               : "inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700"
                           }
                         >
-                          {feature.role}
+                          {
+                            feature.role
+                          }
                         </span>
-
                       </td>
-
 
                       <td className="px-6 py-5 font-medium text-slate-700">
-                        {feature.unit || "—"}
+                        {feature.unit ||
+                          "—"}
                       </td>
-
 
                       <td className="max-w-md px-6 py-5 leading-6 text-slate-500">
-                        {feature.description ||
-                          "No description available."}
+                        {
+                          feature.description
+                        }
                       </td>
-
                     </tr>
                   ),
                 )}
-
               </tbody>
-
             </table>
-
           </div>
-
         )}
 
-
         <div className="border-t border-slate-200 bg-slate-50/70 px-6 py-4">
-
           <div className="flex items-start gap-3">
-
             <Info
               size={17}
               className="mt-0.5 shrink-0 text-slate-400"
@@ -1625,98 +2224,80 @@ export default function DatasetPage() {
             />
 
             <p className="text-xs leading-5 text-slate-500">
-
               The dataset contains{" "}
-
               <strong className="font-semibold text-slate-700">
                 {formatNumber(
                   dataset.validRecordCount,
                 )}
               </strong>{" "}
-
               valid records across{" "}
-
               <strong className="font-semibold text-slate-700">
                 {formatNumber(
                   dataset.featureCount,
                 )}
               </strong>{" "}
-
               input{" "}
-
-              {dataset.featureCount === 1
+              {dataset.featureCount ===
+              1
                 ? "feature"
                 : "features"}{" "}
-
               and{" "}
-
               <strong className="font-semibold text-slate-700">
                 {formatNumber(
                   dataset.targetCount,
                 )}
               </strong>{" "}
-
               target{" "}
-
-              {dataset.targetCount === 1
+              {dataset.targetCount ===
+              1
                 ? "variable."
                 : "variables."}
-
             </p>
-
           </div>
-
         </div>
-
       </section>
-
 
       {/* ======================================================================
           MODEL INFORMATION
       ====================================================================== */}
 
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
         <div className="flex items-start gap-4">
-
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-emerald-300">
-
             <BarChart3
               size={21}
               aria-hidden="true"
             />
-
           </div>
 
           <div className="min-w-0">
-
             <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
               Machine Learning Model
             </p>
 
             <h2 className="mt-1 text-xl font-bold text-slate-950">
-              {dataset.model.name}
+              {
+                dataset.model
+                  .name
+              }
             </h2>
 
             <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-500">
-              {dataset.model.description}
+              {
+                dataset.model
+                  .description
+              }
             </p>
-
           </div>
-
         </div>
 
-
         <div className="mt-6 grid gap-4 md:grid-cols-3">
-
           <div className="rounded-xl bg-slate-50 p-4">
-
             <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
               Input Features
             </p>
 
             <div className="mt-3 flex flex-wrap gap-2">
-
               {dataset.model.features.map(
                 (feature) => (
                   <code
@@ -1727,41 +2308,36 @@ export default function DatasetPage() {
                   </code>
                 ),
               )}
-
             </div>
-
           </div>
 
-
           <div className="rounded-xl bg-slate-50 p-4">
-
             <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
               Prediction Target
             </p>
 
             <code className="mt-3 inline-block rounded-lg bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200">
-              {dataset.model.target}
+              {
+                dataset.model
+                  .target
+              }
             </code>
-
           </div>
 
-
           <div className="rounded-xl bg-slate-50 p-4">
-
             <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
               Target Unit
             </p>
 
             <p className="mt-3 text-lg font-bold text-slate-950">
-              {dataset.model.targetUnit}
+              {
+                dataset.model
+                  .targetUnit
+              }
             </p>
-
           </div>
-
         </div>
-
       </section>
-
 
       {/* ======================================================================
           DATA QUALITY
@@ -1771,22 +2347,16 @@ export default function DatasetPage() {
         aria-labelledby="data-quality-heading"
         className="grid gap-6 lg:grid-cols-[1fr_1.5fr]"
       >
-
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
           <div className="flex items-center gap-3">
-
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
-
               <CheckCircle2
                 size={20}
                 aria-hidden="true"
               />
-
             </div>
 
             <div>
-
               <h2
                 id="data-quality-heading"
                 className="font-bold text-slate-950"
@@ -1797,16 +2367,11 @@ export default function DatasetPage() {
               <p className="text-sm text-slate-500">
                 Dataset readiness
               </p>
-
             </div>
-
           </div>
 
-
           <div className="mt-6">
-
             <div className="flex items-center justify-between">
-
               <span className="text-sm font-medium text-slate-600">
                 Valid records
               </span>
@@ -1816,9 +2381,7 @@ export default function DatasetPage() {
                   validationPercentage,
                 )}
               </span>
-
             </div>
-
 
             <div
               className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"
@@ -1830,7 +2393,6 @@ export default function DatasetPage() {
                 validationPercentage
               }
             >
-
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-500"
                 style={{
@@ -1838,78 +2400,56 @@ export default function DatasetPage() {
                     `${validationPercentage}%`,
                 }}
               />
-
             </div>
 
-
             <p className="mt-3 text-xs leading-5 text-slate-500">
-
               {formatNumber(
                 dataset.validRecordCount,
               )}{" "}
-
               of{" "}
-
               {formatNumber(
                 dataset.recordCount,
               )}{" "}
-
               total records passed dataset validation.
-
             </p>
 
-
-            {dataset.invalidRecordCount > 0 && (
-
+            {dataset.invalidRecordCount >
+              0 && (
               <p className="mt-2 text-xs font-medium text-amber-600">
-
                 {formatNumber(
                   dataset.invalidRecordCount,
                 )}{" "}
-
                 records did not pass validation.
-
               </p>
-
             )}
-
           </div>
-
         </div>
 
-
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-950 to-slate-900 p-6 text-white shadow-sm">
-
           <div className="flex items-start gap-4">
-
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 text-emerald-300">
-
               <BarChart3
                 size={20}
                 aria-hidden="true"
               />
-
             </div>
 
             <div className="min-w-0">
-
               <h2 className="font-bold">
                 How the dataset is used
               </h2>
 
               <p className="mt-2 text-sm leading-6 text-slate-300">
-                {dataset.model.description}
+                {
+                  dataset.model
+                    .description
+                }
               </p>
-
             </div>
-
           </div>
 
-
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
-
             <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                 Inputs
               </p>
@@ -1922,16 +2462,14 @@ export default function DatasetPage() {
 
               <p className="mt-1 text-xs text-slate-400">
                 Model{" "}
-                {dataset.featureCount === 1
+                {dataset.featureCount ===
+                1
                   ? "feature"
                   : "features"}
               </p>
-
             </div>
 
-
             <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                 Target
               </p>
@@ -1944,16 +2482,14 @@ export default function DatasetPage() {
 
               <p className="mt-1 text-xs text-slate-400">
                 Prediction{" "}
-                {dataset.targetCount === 1
+                {dataset.targetCount ===
+                1
                   ? "target"
                   : "targets"}
               </p>
-
             </div>
 
-
             <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                 Records
               </p>
@@ -1967,57 +2503,44 @@ export default function DatasetPage() {
               <p className="mt-1 text-xs text-slate-400">
                 Valid samples
               </p>
-
             </div>
-
           </div>
-
         </div>
-
       </section>
-
 
       {/* ======================================================================
           FOOTER
       ====================================================================== */}
 
       <footer className="border-t border-slate-200 pt-6">
-
         <div className="flex flex-col gap-3 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-
           <p>
             Dataset:{" "}
-
             <span className="font-medium text-slate-500">
-              {dataset.datasetName}
+              {
+                dataset.datasetName
+              }
             </span>
-
           </p>
 
-
           {formattedLastUpdated && (
-
             <p>
-
               Last updated:{" "}
-
               <time
                 dateTime={
                   dataset.lastUpdated ??
                   undefined
                 }
               >
-                {formattedLastUpdated}
+                {
+                  formattedLastUpdated
+                }
               </time>
-
             </p>
-
           )}
-
         </div>
-
       </footer>
-
     </div>
   );
 }
+
