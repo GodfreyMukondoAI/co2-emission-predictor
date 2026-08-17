@@ -14,6 +14,7 @@ Responsibilities
 - Support local Vite development
 - Provide API metadata
 - Provide root/system information
+- Provide CORS diagnostics
 - Configure application lifecycle logging
 - Expose Swagger and ReDoc documentation
 
@@ -27,6 +28,10 @@ POST /api/predict
 GET  /dataset/health
 GET  /dataset/metadata
 GET  /dataset/records
+
+System diagnostics
+------------------
+GET  /api/cors
 
 Environment variables
 ---------------------
@@ -61,7 +66,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dataset import router as dataset_router
@@ -88,6 +93,7 @@ The API provides:
 - Actual dataset records
 - Dataset pagination
 - Dataset search
+- CORS-protected browser access
 - Interactive API documentation
 """
 
@@ -127,7 +133,7 @@ def get_app_environment() -> str:
     environment = os.getenv(
         "APP_ENV",
         DEFAULT_APP_ENV,
-    ).strip()
+    ).strip().lower()
 
     return environment or DEFAULT_APP_ENV
 
@@ -136,24 +142,29 @@ def get_app_environment() -> str:
 # CORS CONFIGURATION
 # =============================================================================
 
-# These origins are safe for local development and local Vite preview.
+# -----------------------------------------------------------------------------
+# Production frontend
+# -----------------------------------------------------------------------------
 #
-# The deployed Render frontend is also included as a built-in production
-# fallback so that the API remains accessible even if CORS_ORIGINS was
-# accidentally omitted from the Render environment variables.
+# This is your current deployed Render frontend.
 #
-# CORS_ORIGINS should still be configured in Render because environment-based
-# configuration is preferred for production deployments.
+# Keeping this as a built-in trusted origin means the API remains accessible
+# even if CORS_ORIGINS is accidentally missing from Render.
+#
+# CORS_ORIGINS should STILL be configured in Render because environment-based
+# configuration is preferred for production.
+# -----------------------------------------------------------------------------
 
-DEFAULT_CORS_ORIGINS = [
-    # -------------------------------------------------------------------------
-    # Production Render frontend
-    # -------------------------------------------------------------------------
-    "https://co2-emission-predictor-frontend.onrender.com",
+PRODUCTION_FRONTEND_ORIGIN = (
+    "https://co2-emission-predictor-frontend.onrender.com"
+)
 
-    # -------------------------------------------------------------------------
-    # Local Vite development
-    # -------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Safe local development origins
+# -----------------------------------------------------------------------------
+
+LOCAL_CORS_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
@@ -162,13 +173,25 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:5174",
     "http://127.0.0.1:5175",
 
-    # -------------------------------------------------------------------------
-    # Vite production preview
-    # -------------------------------------------------------------------------
+    # Vite preview
     "http://localhost:4173",
     "http://127.0.0.1:4173",
 ]
 
+
+# -----------------------------------------------------------------------------
+# Built-in default origins
+# -----------------------------------------------------------------------------
+
+DEFAULT_CORS_ORIGINS = [
+    PRODUCTION_FRONTEND_ORIGIN,
+    *LOCAL_CORS_ORIGINS,
+]
+
+
+# =============================================================================
+# CORS HELPERS
+# =============================================================================
 
 def normalize_origin(
     origin: str,
@@ -176,7 +199,7 @@ def normalize_origin(
     """
     Normalize a browser origin.
 
-    Removes surrounding whitespace and trailing slashes.
+    Removes surrounding whitespace and trailing slash.
 
     Example:
 
@@ -187,31 +210,26 @@ def normalize_origin(
         https://example.com
     """
 
-    return (
-        origin
-        .strip()
-        .rstrip("/")
-    )
+    return origin.strip().rstrip("/")
 
 
 def get_cors_origins() -> list[str]:
     """
-    Build the final list of allowed CORS origins.
+    Build the final list of trusted CORS origins.
 
-    Origins supplied through CORS_ORIGINS are combined with the safe
-    built-in development and production origins.
+    Origins supplied through CORS_ORIGINS are combined with the built-in
+    production and local development origins.
 
     Example:
 
         CORS_ORIGINS=https://example.com,https://www.example.com
 
-    Results in:
+    Results in a unique list containing:
 
-        [
-            "https://example.com",
-            "https://www.example.com",
-            ...
-        ]
+        https://example.com
+        https://www.example.com
+        production Render frontend
+        local development origins
 
     The backend URL itself must never be used as a browser origin.
     """
@@ -229,35 +247,21 @@ def get_cors_origins() -> list[str]:
 
     for origin in configured_origins.split(","):
 
-        normalized = normalize_origin(
-            origin
-        )
+        normalized = normalize_origin(origin)
 
-        if (
-            normalized
-            and normalized not in origins
-        ):
-            origins.append(
-                normalized
-            )
+        if normalized and normalized not in origins:
+            origins.append(normalized)
 
     # -------------------------------------------------------------------------
-    # Built-in safe origins
+    # Built-in trusted origins
     # -------------------------------------------------------------------------
 
     for origin in DEFAULT_CORS_ORIGINS:
 
-        normalized = normalize_origin(
-            origin
-        )
+        normalized = normalize_origin(origin)
 
-        if (
-            normalized
-            and normalized not in origins
-        ):
-            origins.append(
-                normalized
-            )
+        if normalized and normalized not in origins:
+            origins.append(normalized)
 
     return origins
 
@@ -275,15 +279,15 @@ def validate_cors_configuration(
     """
     Validate the CORS configuration at startup.
 
-    This intentionally rejects wildcard origins.
+    Wildcard origins are deliberately rejected.
 
     Production APIs should explicitly identify trusted browser origins instead
     of using:
 
         *
 
-    This is especially important when the API is eventually extended with
-    authenticated requests.
+    This is especially important if authentication or credentials are added
+    in the future.
     """
 
     if not origins:
@@ -301,17 +305,19 @@ def validate_cors_configuration(
             )
 
         if not (
-            origin.startswith(
-                "http://"
-            )
-            or origin.startswith(
-                "https://"
-            )
+            origin.startswith("http://")
+            or origin.startswith("https://")
         ):
             raise RuntimeError(
                 "Invalid CORS origin configured: "
                 f"{origin!r}. "
                 "Origins must start with http:// or https://."
+            )
+
+        if " " in origin:
+            raise RuntimeError(
+                "Invalid CORS origin contains whitespace: "
+                f"{origin!r}"
             )
 
 
@@ -367,9 +373,9 @@ async def lifespan(
     )
 
     # -------------------------------------------------------------------------
-    # Log each configured origin.
+    # Log every allowed origin.
     #
-    # This is extremely useful when debugging Render CORS deployments.
+    # This is intentionally useful when debugging Render deployments.
     # -------------------------------------------------------------------------
 
     for origin in ALLOWED_ORIGINS:
@@ -380,11 +386,23 @@ async def lifespan(
         )
 
     logger.info(
-        "Available API documentation: /docs"
+        "API documentation: /docs"
     )
 
     logger.info(
         "Alternative API documentation: /redoc"
+    )
+
+    logger.info(
+        "System endpoints:"
+    )
+
+    logger.info(
+        "  GET /"
+    )
+
+    logger.info(
+        "  GET /api/cors"
     )
 
     logger.info(
@@ -448,13 +466,42 @@ app = FastAPI(
     description=APP_DESCRIPTION,
     version=APP_VERSION,
     lifespan=lifespan,
+
+    # -------------------------------------------------------------------------
+    # Swagger
+    # -------------------------------------------------------------------------
     docs_url="/docs",
+
+    # -------------------------------------------------------------------------
+    # ReDoc
+    # -------------------------------------------------------------------------
     redoc_url="/redoc",
+
+    # -------------------------------------------------------------------------
+    # OpenAPI schema
+    # -------------------------------------------------------------------------
+    openapi_url="/openapi.json",
 )
 
 
 # =============================================================================
 # CORS MIDDLEWARE
+# =============================================================================
+#
+# IMPORTANT:
+#
+# CORSMiddleware must be registered before the application starts handling
+# browser requests.
+#
+# Explicit origins are used instead of "*".
+#
+# This configuration allows:
+#
+#   GET
+#   POST
+#   OPTIONS
+#
+# and the headers normally required by the frontend.
 # =============================================================================
 
 app.add_middleware(
@@ -466,14 +513,14 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
 
     # -------------------------------------------------------------------------
-    # We currently do not use browser cookies for the prediction API.
+    # Credentials are currently disabled.
     #
-    # Keeping this False avoids unnecessarily broad credential behavior.
+    # The prediction API does not currently require browser cookies.
     # -------------------------------------------------------------------------
     allow_credentials=False,
 
     # -------------------------------------------------------------------------
-    # Supported HTTP methods
+    # HTTP methods
     # -------------------------------------------------------------------------
     allow_methods=[
         "GET",
@@ -482,16 +529,17 @@ app.add_middleware(
     ],
 
     # -------------------------------------------------------------------------
-    # Supported request headers
+    # Request headers
     # -------------------------------------------------------------------------
     allow_headers=[
         "Accept",
         "Content-Type",
         "Authorization",
+        "Origin",
     ],
 
     # -------------------------------------------------------------------------
-    # Browser preflight cache
+    # Cache browser preflight responses.
     # -------------------------------------------------------------------------
     max_age=3600,
 )
@@ -562,16 +610,134 @@ def root() -> dict[str, str]:
         "message": (
             "Welcome to the CO₂ Emission Predictor API."
         ),
+
         "name": APP_TITLE,
+
         "version": APP_VERSION,
+
         "environment": get_app_environment(),
+
         "status": "operational",
+
         "documentation": "/docs",
+
         "alternative_documentation": "/redoc",
+
         "health": "/api/health",
+
         "model": "/api/model",
+
         "prediction_endpoint": "/api/predict",
+
         "dataset_health": "/dataset/health",
+
         "dataset_metadata": "/dataset/metadata",
+
         "dataset_records": "/dataset/records",
+    }
+
+
+# =============================================================================
+# CORS DIAGNOSTIC ENDPOINT
+# =============================================================================
+
+@app.get(
+    "/api/cors",
+    tags=["System"],
+    summary="CORS configuration diagnostics",
+)
+def cors_diagnostics(
+    request: Request,
+) -> dict[str, object]:
+    """
+    Return CORS diagnostic information.
+
+    This endpoint is particularly useful when troubleshooting browser
+    requests from the deployed Render frontend.
+
+    Example request:
+
+        GET /api/cors
+
+    with:
+
+        Origin:
+        https://co2-emission-predictor-frontend.onrender.com
+
+    The endpoint reports:
+
+    - The request Origin
+    - Whether that origin is configured as trusted
+    - The configured trusted origins
+
+    It does NOT expose environment secrets.
+    """
+
+    request_origin = request.headers.get(
+        "origin"
+    )
+
+    normalized_request_origin = (
+        normalize_origin(request_origin)
+        if request_origin
+        else None
+    )
+
+    origin_allowed = (
+        normalized_request_origin in ALLOWED_ORIGINS
+        if normalized_request_origin
+        else False
+    )
+
+    return {
+        "status": "ok",
+
+        "request_origin": normalized_request_origin,
+
+        "origin_allowed": origin_allowed,
+
+        "production_frontend": (
+            PRODUCTION_FRONTEND_ORIGIN
+        ),
+
+        "allowed_origins": ALLOWED_ORIGINS,
+
+        "cors_origins_environment_configured": bool(
+            os.getenv("CORS_ORIGINS", "").strip()
+        ),
+    }
+
+
+# =============================================================================
+# APPLICATION HEALTH FALLBACK
+# =============================================================================
+
+@app.get(
+    "/api/system/health",
+    tags=["System"],
+    summary="System health check",
+)
+def system_health() -> dict[str, object]:
+    """
+    Return basic API process health.
+
+    The machine-learning-specific health endpoint remains:
+
+        /api/health
+
+    This endpoint provides an independent application-level health check.
+    """
+
+    return {
+        "status": "healthy",
+
+        "service": APP_TITLE,
+
+        "version": APP_VERSION,
+
+        "environment": get_app_environment(),
+
+        "cors_configured": bool(
+            ALLOWED_ORIGINS
+        ),
     }
