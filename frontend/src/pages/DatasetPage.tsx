@@ -1,4 +1,3 @@
-
 /**
  * ============================================================================
  * CO₂ EMISSION PREDICTOR
@@ -7,6 +6,8 @@
  * DatasetPage
  *
  * Production-ready dataset information page.
+ *
+ * Architecture:
  *
  * FastAPI is the single source of truth for:
  * - Dataset metadata
@@ -35,13 +36,14 @@
  *
  * VITE_DATASET_METADATA_ENDPOINT
  *   Optional.
- *   Defaults to:
+ *   Defaults:
  *     /dataset/metadata
  *
  * VITE_API_TIMEOUT
  *   Optional.
- *   Defaults to:
+ *   Defaults:
  *     30000
+ *
  * ============================================================================
  */
 
@@ -84,7 +86,7 @@ interface DatasetStatisticResponse {
   label: string;
   value: string;
   description: string;
-  type?: string;
+  type?: string | null;
 }
 
 interface DatasetStatistic {
@@ -161,22 +163,31 @@ interface ApiErrorResponse {
    ENVIRONMENT CONFIGURATION
 ============================================================================ */
 
+const DEFAULT_API_URL =
+  "http://127.0.0.1:8000";
+
+const DEFAULT_DATASET_ENDPOINT =
+  "/dataset/metadata";
+
+const DEFAULT_TIMEOUT_MS = 30000;
+
 const API_BASE_URL = normalizeBaseUrl(
   import.meta.env.VITE_API_URL ||
-    "http://127.0.0.1:8000",
+    DEFAULT_API_URL,
 );
 
 const DATASET_METADATA_PATH =
   normalizeEndpointPath(
     import.meta.env
       .VITE_DATASET_METADATA_ENDPOINT ||
-      "/dataset/metadata",
+      DEFAULT_DATASET_ENDPOINT,
   );
 
-const REQUEST_TIMEOUT_MS = parseTimeout(
-  import.meta.env.VITE_API_TIMEOUT ||
-    "30000",
-);
+const REQUEST_TIMEOUT_MS =
+  parseTimeout(
+    import.meta.env.VITE_API_TIMEOUT ||
+      String(DEFAULT_TIMEOUT_MS),
+  );
 
 const DATASET_METADATA_ENDPOINT =
   `${API_BASE_URL}${DATASET_METADATA_PATH}`;
@@ -188,9 +199,16 @@ const DATASET_METADATA_ENDPOINT =
 function normalizeBaseUrl(
   value: string,
 ): string {
-  return value
-    .trim()
-    .replace(/\/+$/, "");
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return DEFAULT_API_URL;
+  }
+
+  return normalized.replace(
+    /\/+$/,
+    "",
+  );
 }
 
 function normalizeEndpointPath(
@@ -199,7 +217,7 @@ function normalizeEndpointPath(
   const normalized = value.trim();
 
   if (!normalized) {
-    return "/dataset/metadata";
+    return DEFAULT_DATASET_ENDPOINT;
   }
 
   return normalized.startsWith("/")
@@ -216,10 +234,13 @@ function parseTimeout(
     !Number.isFinite(timeout) ||
     timeout <= 0
   ) {
-    return 30000;
+    return DEFAULT_TIMEOUT_MS;
   }
 
-  return Math.floor(timeout);
+  return Math.max(
+    1000,
+    Math.floor(timeout),
+  );
 }
 
 /* ============================================================================
@@ -232,7 +253,8 @@ if (import.meta.env.DEV) {
     {
       endpoint:
         DATASET_METADATA_ENDPOINT,
-      timeout: REQUEST_TIMEOUT_MS,
+      timeout:
+        REQUEST_TIMEOUT_MS,
       environment:
         import.meta.env.MODE,
     },
@@ -320,18 +342,15 @@ function isDatasetFeature(
     return false;
   }
 
-  const column = value.column;
-  const role = value.role;
-  const unit = value.unit;
-  const description =
-    value.description;
-
   return (
-    isNonEmptyString(column) &&
-    (role === "Feature" ||
-      role === "Target") &&
-    typeof unit === "string" &&
-    typeof description === "string"
+    isNonEmptyString(value.column) &&
+    (
+      value.role === "Feature" ||
+      value.role === "Target"
+    ) &&
+    typeof value.unit === "string" &&
+    typeof value.description ===
+      "string"
   );
 }
 
@@ -346,21 +365,16 @@ function isDatasetStatisticResponse(
     return false;
   }
 
-  const label = value.label;
-  const statisticValue =
-    value.value;
-  const description =
-    value.description;
-  const type = value.type;
-
   return (
-    isNonEmptyString(label) &&
-    isNonEmptyString(statisticValue) &&
-    isNonEmptyString(description) &&
+    isNonEmptyString(value.label) &&
+    isNonEmptyString(value.value) &&
+    isNonEmptyString(
+      value.description,
+    ) &&
     (
-      type === undefined ||
-      type === null ||
-      isNonEmptyString(type)
+      value.type === undefined ||
+      value.type === null ||
+      isNonEmptyString(value.type)
     )
   );
 }
@@ -407,7 +421,10 @@ function isFeatureStatistics(
     return false;
   }
 
-  return Object.entries(value).every(
+  const entries =
+    Object.entries(value);
+
+  return entries.every(
     ([column, statistics]) =>
       isNonEmptyString(column) &&
       isDatasetNumericStatistics(
@@ -427,10 +444,8 @@ function isTargetStatistics(
     return false;
   }
 
-  const column = value.column;
-
   return (
-    isNonEmptyString(column) &&
+    isNonEmptyString(value.column) &&
     isDatasetNumericStatistics(value)
   );
 }
@@ -446,21 +461,16 @@ function isDatasetModel(
     return false;
   }
 
-  const name = value.name;
-  const description =
-    value.description;
-  const features = value.features;
-  const target = value.target;
-  const targetUnit =
-    value.targetUnit;
-
   return (
-    isNonEmptyString(name) &&
-    isNonEmptyString(description) &&
-    isStringArray(features) &&
-    features.length > 0 &&
-    isNonEmptyString(target) &&
-    isNonEmptyString(targetUnit)
+    isNonEmptyString(value.name) &&
+    isNonEmptyString(
+      value.description,
+    ) &&
+    isStringArray(value.features) &&
+    value.features.length > 0 &&
+    hasUniqueStrings(value.features) &&
+    isNonEmptyString(value.target) &&
+    isNonEmptyString(value.targetUnit)
   );
 }
 
@@ -475,37 +485,24 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Basic metadata
-   * --------------------------------------------------------------------------
-   */
-
-  const datasetName =
-    value.datasetName;
-
-  const title = value.title;
-
-  const description =
-    value.description;
+  /* --------------------------------------------------------------------------
+     Basic metadata
+  -------------------------------------------------------------------------- */
 
   if (
-    !isNonEmptyString(datasetName) ||
-    !isNonEmptyString(title) ||
-    typeof description !== "string"
+    !isNonEmptyString(
+      value.datasetName,
+    ) ||
+    !isNonEmptyString(value.title) ||
+    typeof value.description !==
+      "string"
   ) {
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Numeric counts
-   * --------------------------------------------------------------------------
-   *
-   * Explicitly narrow every value here.
-   * This prevents TypeScript from retaining `unknown` later in the
-   * integrity checks.
-   */
+  /* --------------------------------------------------------------------------
+     Numeric counts
+  -------------------------------------------------------------------------- */
 
   const recordCount =
     value.recordCount;
@@ -554,11 +551,17 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Validation percentage
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Dataset must contain records
+  -------------------------------------------------------------------------- */
+
+  if (recordCount <= 0) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Validation percentage
+  -------------------------------------------------------------------------- */
 
   const validationPercentage =
     value.validationPercentage;
@@ -571,11 +574,9 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Column names
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Column names
+  -------------------------------------------------------------------------- */
 
   const columnNames =
     value.columnNames;
@@ -587,168 +588,35 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Features
-   * --------------------------------------------------------------------------
-   */
+  if (
+    columnCount !==
+    columnNames.length
+  ) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Features
+  -------------------------------------------------------------------------- */
 
   const features =
     value.features;
 
   if (
     !Array.isArray(features) ||
-    !features.every(isDatasetFeature)
-  ) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Statistics
-   * --------------------------------------------------------------------------
-   */
-
-  const statistics =
-    value.statistics;
-
-  if (
-    !Array.isArray(statistics) ||
-    !statistics.every(
-      isDatasetStatisticResponse,
+    features.length === 0 ||
+    !features.every(
+      isDatasetFeature,
     )
   ) {
     return false;
   }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Feature statistics
-   * --------------------------------------------------------------------------
-   */
-
-  const featureStatistics =
-    value.featureStatistics;
-
-  if (
-    !isFeatureStatistics(
-      featureStatistics,
-    )
-  ) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Target statistics
-   * --------------------------------------------------------------------------
-   */
-
-  const targetStatistics =
-    value.targetStatistics;
-
-  if (
-    !isTargetStatistics(
-      targetStatistics,
-    )
-  ) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Model
-   * --------------------------------------------------------------------------
-   */
-
-  const model = value.model;
-
-  if (!isDatasetModel(model)) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Last updated
-   * --------------------------------------------------------------------------
-   */
-
-  const lastUpdated =
-    value.lastUpdated;
-
-  if (
-    lastUpdated !== undefined &&
-    lastUpdated !== null &&
-    !isNonEmptyString(lastUpdated)
-  ) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Record integrity
-   * --------------------------------------------------------------------------
-   */
-
-  if (
-    validRecordCount +
-      invalidRecordCount !==
-    recordCount
-  ) {
-    return false;
-  }
-
-  if (recordCount <= 0) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Column integrity
-   * --------------------------------------------------------------------------
-   */
-
-  if (columnCount !== columnNames.length) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Feature integrity
-   * --------------------------------------------------------------------------
-   */
-
-  if (
-    featureCount +
-      targetCount !==
-    features.length
-  ) {
-    return false;
-  }
-
-  if (targetCount !== 1) {
-    return false;
-  }
-
-  if (
-    featureCount !==
-    model.features.length
-  ) {
-    return false;
-  }
-
-  /*
-   * --------------------------------------------------------------------------
-   * Feature metadata integrity
-   * --------------------------------------------------------------------------
-   */
 
   const featureColumns =
     features
       .filter(
         (feature) =>
-          feature.role ===
-          "Feature",
+          feature.role === "Feature",
       )
       .map(
         (feature) =>
@@ -759,13 +627,23 @@ function isDatasetMetadataResponse(
     features
       .filter(
         (feature) =>
-          feature.role ===
-          "Target",
+          feature.role === "Target",
       )
       .map(
         (feature) =>
           feature.column,
       );
+
+  if (
+    !hasUniqueStrings(
+      features.map(
+        (feature) =>
+          feature.column,
+      ),
+    )
+  ) {
+    return false;
+  }
 
   if (
     featureColumns.length !==
@@ -781,27 +659,24 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  if (
-    !hasUniqueStrings(
-      features.map(
-        (feature) =>
-          feature.column,
-      ),
-    )
-  ) {
+  /* --------------------------------------------------------------------------
+     Model
+  -------------------------------------------------------------------------- */
+
+  const model =
+    value.model;
+
+  if (!isDatasetModel(model)) {
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Model integrity
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Model feature integrity
+  -------------------------------------------------------------------------- */
 
   if (
-    !hasUniqueStrings(
-      model.features,
-    )
+    model.features.length !==
+    featureCount
   ) {
     return false;
   }
@@ -817,6 +692,10 @@ function isDatasetMetadataResponse(
     return false;
   }
 
+  /* --------------------------------------------------------------------------
+     Target integrity
+  -------------------------------------------------------------------------- */
+
   if (
     !columnNames.includes(
       model.target,
@@ -826,26 +705,59 @@ function isDatasetMetadataResponse(
   }
 
   if (
-    model.target !==
-    targetStatistics.column
+    targetCount !== 1
   ) {
     return false;
   }
 
   if (
-    !targetColumns.includes(
-      model.target,
+    targetColumns.length !== 1
+  ) {
+    return false;
+  }
+
+  if (
+    targetColumns[0] !==
+    model.target
+  ) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Statistics
+  -------------------------------------------------------------------------- */
+
+  const statistics =
+    value.statistics;
+
+  if (
+    !Array.isArray(statistics) ||
+    !statistics.every(
+      isDatasetStatisticResponse,
+    )
+  ) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Feature statistics
+  -------------------------------------------------------------------------- */
+
+  const featureStatistics =
+    value.featureStatistics;
+
+  if (
+    !isFeatureStatistics(
+      featureStatistics,
     )
   ) {
     return false;
   }
 
   /*
-   * --------------------------------------------------------------------------
-   * Feature statistics integrity
-   * --------------------------------------------------------------------------
+   * Every model feature must have
+   * corresponding numeric statistics.
    */
-
   for (
     const feature of model.features
   ) {
@@ -859,25 +771,31 @@ function isDatasetMetadataResponse(
     }
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Target statistics integrity
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Target statistics
+  -------------------------------------------------------------------------- */
+
+  const targetStatistics =
+    value.targetStatistics;
 
   if (
-    !featureStatistics[
-      model.features[0]
-    ]
+    !isTargetStatistics(
+      targetStatistics,
+    )
   ) {
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Missing values integrity
-   * --------------------------------------------------------------------------
-   */
+  if (
+    targetStatistics.column !==
+    model.target
+  ) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Missing values integrity
+  -------------------------------------------------------------------------- */
 
   if (
     missingValues >
@@ -886,32 +804,52 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Validation percentage integrity
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Record integrity
+  -------------------------------------------------------------------------- */
+
+  if (
+    validRecordCount +
+      invalidRecordCount !==
+    recordCount
+  ) {
+    return false;
+  }
+
+  /* --------------------------------------------------------------------------
+     Validation percentage integrity
+  -------------------------------------------------------------------------- */
 
   const calculatedPercentage =
     (
       validRecordCount /
       recordCount
-    ) * 100;
+    ) *
+    100;
 
   if (
     Math.abs(
       calculatedPercentage -
         validationPercentage,
-    ) > 0.1
+    ) > 0.2
   ) {
     return false;
   }
 
-  /*
-   * --------------------------------------------------------------------------
-   * Everything passed.
-   * --------------------------------------------------------------------------
-   */
+  /* --------------------------------------------------------------------------
+     Last updated
+  -------------------------------------------------------------------------- */
+
+  if (
+    value.lastUpdated !==
+      undefined &&
+    value.lastUpdated !== null &&
+    !isNonEmptyString(
+      value.lastUpdated,
+    )
+  ) {
+    return false;
+  }
 
   return true;
 }
@@ -921,16 +859,20 @@ function isDatasetMetadataResponse(
 ============================================================================ */
 
 function getStatisticIcon(
-  type?: string,
+  type?: string | null,
 ): LucideIcon {
-  switch (type) {
+  switch (
+    type?.trim().toLowerCase()
+  ) {
     case "records":
       return Rows3;
 
     case "engine-size":
+    case "engine_size":
       return Gauge;
 
     case "fuel-consumption":
+    case "fuel_consumption":
       return Fuel;
 
     case "target":
@@ -985,7 +927,11 @@ function formatDate(
 
   const date = new Date(value);
 
-  if (Number.isNaN(date.getTime())) {
+  if (
+    Number.isNaN(
+      date.getTime(),
+    )
+  ) {
     return null;
   }
 
@@ -1067,7 +1013,8 @@ function getApiErrorMessage(
    ERROR TYPES
 ============================================================================ */
 
-class DatasetApiError extends Error {
+class DatasetApiError
+  extends Error {
   readonly status?: number;
   readonly code?: string;
 
@@ -1133,13 +1080,10 @@ async function fetchDatasetMetadata(
   let timedOut = false;
 
   const timeoutId =
-    window.setTimeout(
-      () => {
-        timedOut = true;
-        timeoutController.abort();
-      },
-      REQUEST_TIMEOUT_MS,
-    );
+    window.setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, REQUEST_TIMEOUT_MS);
 
   const abortHandler = () => {
     timeoutController.abort();
@@ -1244,6 +1188,8 @@ async function fetchDatasetMetadata(
       throw new DatasetApiError(
         "The dataset API returned an unsupported response format.",
         {
+          status:
+            response.status,
           code:
             "INVALID_CONTENT_TYPE",
         },
@@ -1257,7 +1203,7 @@ async function fetchDatasetMetadata(
     ) {
       if (import.meta.env.DEV) {
         console.error(
-          "[DatasetPage] Invalid API response:",
+          "[DatasetPage] Invalid dataset metadata response:",
           responseBody,
         );
       }
@@ -1265,6 +1211,8 @@ async function fetchDatasetMetadata(
       throw new DatasetApiError(
         "The dataset API returned invalid dataset metadata.",
         {
+          status:
+            response.status,
           code:
             "INVALID_RESPONSE",
         },
@@ -1372,7 +1320,9 @@ function DatasetPageSkeleton() {
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="animate-pulse space-y-5">
           <div className="h-6 w-48 rounded bg-slate-200" />
+
           <div className="h-4 w-72 rounded bg-slate-100" />
+
           <div className="h-40 rounded bg-slate-100" />
         </div>
       </section>
@@ -1510,16 +1460,22 @@ export default function DatasetPage() {
       null,
     );
 
-  const [loading, setLoading] =
-    useState(true);
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
 
   const [
     refreshing,
     setRefreshing,
   ] = useState(false);
 
-  const [error, setError] =
-    useState<string | null>(null);
+  const [
+    error,
+    setError,
+  ] = useState<string | null>(
+    null,
+  );
 
   const activeRequestRef =
     useRef<AbortController | null>(
@@ -1541,6 +1497,9 @@ export default function DatasetPage() {
           options?.refresh ??
           false;
 
+        /*
+         * Cancel the previous request.
+         */
         activeRequestRef.current?.abort();
 
         const controller =
@@ -1563,6 +1522,9 @@ export default function DatasetPage() {
               controller.signal,
             );
 
+          /*
+           * Ignore stale requests.
+           */
           if (
             controller.signal.aborted
           ) {
@@ -1578,6 +1540,10 @@ export default function DatasetPage() {
 
           setDataset(data);
         } catch (err) {
+          /*
+           * Aborted requests are expected
+           * during refresh/unmount.
+           */
           if (
             isAbortError(err) ||
             controller.signal.aborted
@@ -1641,51 +1607,47 @@ export default function DatasetPage() {
   ========================================================================== */
 
   const statistics =
-    useMemo<DatasetStatistic[]>(
-      () => {
-        if (!dataset) {
-          return [];
-        }
+    useMemo<
+      DatasetStatistic[]
+    >(() => {
+      if (!dataset) {
+        return [];
+      }
 
-        return dataset.statistics.map(
-          (statistic) => ({
-            label:
-              statistic.label,
-            value:
-              statistic.value,
-            description:
-              statistic.description,
-            icon:
-              getStatisticIcon(
-                statistic.type,
-              ),
-          }),
-        );
-      },
-      [dataset],
-    );
+      return dataset.statistics.map(
+        (statistic) => ({
+          label:
+            statistic.label,
+          value:
+            statistic.value,
+          description:
+            statistic.description,
+          icon:
+            getStatisticIcon(
+              statistic.type,
+            ),
+        }),
+      );
+    }, [dataset]);
 
   /* ==========================================================================
-     VALIDATION
+     VALIDATION PERCENTAGE
   ========================================================================== */
 
   const validationPercentage =
-    useMemo(
-      () => {
-        if (!dataset) {
-          return 0;
-        }
+    useMemo(() => {
+      if (!dataset) {
+        return 0;
+      }
 
-        return Math.min(
-          Math.max(
-            dataset.validationPercentage,
-            0,
-          ),
-          100,
-        );
-      },
-      [dataset],
-    );
+      return Math.min(
+        Math.max(
+          dataset.validationPercentage,
+          0,
+        ),
+        100,
+      );
+    }, [dataset]);
 
   /* ==========================================================================
      LAST UPDATED
@@ -1777,17 +1739,9 @@ export default function DatasetPage() {
 
   return (
     <div className="space-y-8 pb-10">
-      {error && (
-        <RefreshError
-          message={error}
-          onRetry={
-            handleRefresh
-          }
-          refreshing={
-            refreshing
-          }
-        />
-      )}
+      {/* ======================================================================
+          ACCESSIBLE REFRESH STATUS
+      ====================================================================== */}
 
       <div
         className="sr-only"
@@ -1800,6 +1754,22 @@ export default function DatasetPage() {
             ? `Dataset refresh failed. ${error}`
             : "Dataset information loaded."}
       </div>
+
+      {/* ======================================================================
+          REFRESH ERROR
+      ====================================================================== */}
+
+      {error && (
+        <RefreshError
+          message={error}
+          onRetry={
+            handleRefresh
+          }
+          refreshing={
+            refreshing
+          }
+        />
+      )}
 
       {/* ======================================================================
           HEADER
@@ -1824,6 +1794,7 @@ export default function DatasetPage() {
                   size={14}
                   aria-hidden="true"
                 />
+
                 Dataset
               </div>
 
@@ -1922,7 +1893,9 @@ export default function DatasetPage() {
           DATASET OVERVIEW
       ====================================================================== */}
 
-      <section aria-labelledby="dataset-overview-heading">
+      <section
+        aria-labelledby="dataset-overview-heading"
+      >
         <div className="mb-4">
           <h2
             id="dataset-overview-heading"
@@ -2003,7 +1976,10 @@ export default function DatasetPage() {
           DATASET INFORMATION
       ====================================================================== */}
 
-      <section className="grid gap-6 md:grid-cols-3">
+      <section
+        aria-label="Dataset information"
+        className="grid gap-6 md:grid-cols-3"
+      >
         <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
@@ -2103,8 +2079,7 @@ export default function DatasetPage() {
                 Variables used by{" "}
                 <strong className="font-semibold text-slate-700">
                   {
-                    dataset.model
-                      .name
+                    dataset.model.name
                   }
                 </strong>
                 .
@@ -2261,7 +2236,10 @@ export default function DatasetPage() {
           MODEL INFORMATION
       ====================================================================== */}
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <section
+        aria-labelledby="model-information-heading"
+        className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
+      >
         <div className="flex items-start gap-4">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-emerald-300">
             <BarChart3
@@ -2275,10 +2253,12 @@ export default function DatasetPage() {
               Machine Learning Model
             </p>
 
-            <h2 className="mt-1 text-xl font-bold text-slate-950">
+            <h2
+              id="model-information-heading"
+              className="mt-1 text-xl font-bold text-slate-950"
+            >
               {
-                dataset.model
-                  .name
+                dataset.model.name
               }
             </h2>
 
@@ -2318,8 +2298,7 @@ export default function DatasetPage() {
 
             <code className="mt-3 inline-block rounded-lg bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200">
               {
-                dataset.model
-                  .target
+                dataset.model.target
               }
             </code>
           </div>
@@ -2543,4 +2522,3 @@ export default function DatasetPage() {
     </div>
   );
 }
-
