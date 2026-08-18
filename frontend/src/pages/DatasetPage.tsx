@@ -9,11 +9,8 @@
  *
  * FastAPI is the single source of truth.
  *
- * Backend endpoint:
+ * Backend:
  *   GET /dataset/metadata
- *
- * Optional records endpoint:
- *   GET /dataset/records
  *
  * ============================================================================
  */
@@ -44,9 +41,7 @@ import {
    TYPES
 ============================================================================ */
 
-type DatasetFeatureRole =
-  | "Feature"
-  | "Target";
+type DatasetFeatureRole = "Feature" | "Target";
 
 interface DatasetFeature {
   column: string;
@@ -60,13 +55,6 @@ interface DatasetStatisticResponse {
   value: string;
   description: string;
   type?: string | null;
-}
-
-interface DatasetStatistic {
-  label: string;
-  value: string;
-  description: string;
-  icon: LucideIcon;
 }
 
 interface DatasetModel {
@@ -125,13 +113,6 @@ interface DatasetMetadataResponse {
   lastUpdated?: string | null;
 }
 
-interface ApiErrorResponse {
-  detail?: unknown;
-  message?: unknown;
-  error?: unknown;
-  code?: unknown;
-}
-
 /* ============================================================================
    CONSTANTS
 ============================================================================ */
@@ -180,8 +161,7 @@ function normalizeEndpointPath(
     return DEFAULT_DATASET_ENDPOINT;
   }
 
-  const path =
-    value.trim();
+  const path = value.trim();
 
   return path.startsWith("/")
     ? path
@@ -198,8 +178,7 @@ function parseTimeout(
     return DEFAULT_TIMEOUT_MS;
   }
 
-  const parsed =
-    Number(value);
+  const parsed = Number(value);
 
   if (
     !Number.isFinite(parsed) ||
@@ -242,9 +221,7 @@ const DATASET_METADATA_ENDPOINT =
    DEVELOPMENT DIAGNOSTICS
 ============================================================================ */
 
-if (
-  import.meta.env.DEV
-) {
+if (import.meta.env.DEV) {
   console.debug(
     "[DatasetPage] Configuration",
     {
@@ -349,13 +326,10 @@ function isDatasetFeature(
       value.column,
     ) &&
     (
-      value.role ===
-        "Feature" ||
-      value.role ===
-        "Target"
+      value.role === "Feature" ||
+      value.role === "Target"
     ) &&
-    typeof value.unit ===
-      "string" &&
+    typeof value.unit === "string" &&
     typeof value.description ===
       "string"
   );
@@ -383,13 +357,9 @@ function isDatasetStatisticResponse(
       value.description,
     ) &&
     (
-      value.type ===
-        undefined ||
-      value.type ===
-        null ||
-      isNonEmptyString(
-        value.type,
-      )
+      value.type === undefined ||
+      value.type === null ||
+      isNonEmptyString(value.type)
     )
   );
 }
@@ -434,9 +404,7 @@ function isFeatureStatistics(
     return false;
   }
 
-  return Object.entries(
-    value,
-  ).every(
+  return Object.entries(value).every(
     ([column, stats]) =>
       isNonEmptyString(column) &&
       isDatasetNumericStatistics(
@@ -474,23 +442,14 @@ function isDatasetModel(
   }
 
   return (
-    isNonEmptyString(
-      value.name,
-    ) &&
+    isNonEmptyString(value.name) &&
     isNonEmptyString(
       value.description,
     ) &&
-    isStringArray(
-      value.features,
-    ) &&
-    value.features.length >
-      0 &&
-    hasUniqueStrings(
-      value.features,
-    ) &&
-    isNonEmptyString(
-      value.target,
-    ) &&
+    isStringArray(value.features) &&
+    value.features.length > 0 &&
+    hasUniqueStrings(value.features) &&
+    isNonEmptyString(value.target) &&
     isNonEmptyString(
       value.targetUnit,
     )
@@ -512,9 +471,7 @@ function isDatasetMetadataResponse(
     !isNonEmptyString(
       value.datasetName,
     ) ||
-    !isNonEmptyString(
-      value.title,
-    ) ||
+    !isNonEmptyString(value.title) ||
     typeof value.description !==
       "string"
   ) {
@@ -599,10 +556,8 @@ function isDatasetMetadataResponse(
   }
 
   const calculatedPercentage =
-    (
-      validRecordCount /
-      recordCount
-    ) *
+    (validRecordCount /
+      recordCount) *
     100;
 
   if (
@@ -618,9 +573,7 @@ function isDatasetMetadataResponse(
     value.columnNames;
 
   if (
-    !isStringArray(
-      columnNames,
-    ) ||
+    !isStringArray(columnNames) ||
     columnNames.length !==
       columnCount ||
     !hasUniqueStrings(
@@ -647,8 +600,7 @@ function isDatasetMetadataResponse(
     features
       .filter(
         (feature) =>
-          feature.role ===
-          "Feature",
+          feature.role === "Feature",
       )
       .map(
         (feature) =>
@@ -659,8 +611,7 @@ function isDatasetMetadataResponse(
     features
       .filter(
         (feature) =>
-          feature.role ===
-          "Target",
+          feature.role === "Target",
       )
       .map(
         (feature) =>
@@ -706,12 +657,9 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  const model =
-    value.model;
+  const model = value.model;
 
-  if (
-    !isDatasetModel(model)
-  ) {
+  if (!isDatasetModel(model)) {
     return false;
   }
 
@@ -754,9 +702,7 @@ function isDatasetMetadataResponse(
     value.statistics;
 
   if (
-    !Array.isArray(
-      statistics,
-    ) ||
+    !Array.isArray(statistics) ||
     !statistics.every(
       isDatasetStatisticResponse,
     )
@@ -804,8 +750,7 @@ function isDatasetMetadataResponse(
 
   if (
     missingValues >
-    recordCount *
-      columnCount
+    recordCount * columnCount
   ) {
     return false;
   }
@@ -813,8 +758,7 @@ function isDatasetMetadataResponse(
   if (
     value.lastUpdated !==
       undefined &&
-    value.lastUpdated !==
-      null &&
+    value.lastUpdated !== null &&
     !isNonEmptyString(
       value.lastUpdated,
     )
@@ -833,9 +777,7 @@ function getStatisticIcon(
   type?: string | null,
 ): LucideIcon {
   switch (
-    type
-      ?.trim()
-      .toLowerCase()
+    type?.trim().toLowerCase()
   ) {
     case "records":
       return Rows3;
@@ -863,9 +805,7 @@ function getStatisticIcon(
 function formatNumber(
   value: number,
 ): string {
-  if (
-    !Number.isFinite(value)
-  ) {
+  if (!Number.isFinite(value)) {
     return "—";
   }
 
@@ -880,9 +820,7 @@ function formatNumber(
 function formatPercentage(
   value: number,
 ): string {
-  if (
-    !Number.isFinite(value)
-  ) {
+  if (!Number.isFinite(value)) {
     return "—";
   }
 
@@ -899,13 +837,10 @@ function formatDate(
     return null;
   }
 
-  const date =
-    new Date(value);
+  const date = new Date(value);
 
   if (
-    Number.isNaN(
-      date.getTime(),
-    )
+    Number.isNaN(date.getTime())
   ) {
     return null;
   }
@@ -943,34 +878,28 @@ function getApiErrorMessage(
         candidates
     ) {
       if (
-        isNonEmptyString(
-          candidate,
-        )
+        isNonEmptyString(candidate)
       ) {
         return candidate;
       }
 
       if (
-        Array.isArray(
-          candidate,
-        )
+        Array.isArray(candidate)
       ) {
         const messages =
           candidate
-            .map(
-              (item) => {
-                if (
-                  isObject(item) &&
-                  isNonEmptyString(
-                    item.msg,
-                  )
-                ) {
-                  return item.msg;
-                }
+            .map((item) => {
+              if (
+                isObject(item) &&
+                isNonEmptyString(
+                  item.msg,
+                )
+              ) {
+                return item.msg;
+              }
 
-                return null;
-              },
-            )
+              return null;
+            })
             .filter(
               (
                 message,
@@ -978,20 +907,14 @@ function getApiErrorMessage(
                 message !== null,
             );
 
-        if (
-          messages.length
-        ) {
-          return messages.join(
-            " ",
-          );
+        if (messages.length > 0) {
+          return messages.join(" ");
         }
       }
     }
   }
 
-  switch (
-    statusCode
-  ) {
+  switch (statusCode) {
     case 400:
       return "The dataset metadata request was invalid.";
 
@@ -1027,8 +950,7 @@ function getApiErrorMessage(
    API ERRORS
 ============================================================================ */
 
-class DatasetApiError
-  extends Error {
+class DatasetApiError extends Error {
   readonly status?: number;
   readonly code?: string;
 
@@ -1096,22 +1018,17 @@ async function fetchDatasetMetadata(
   let timedOut = false;
 
   const timeoutId =
-    window.setTimeout(
-      () => {
-        timedOut = true;
-        timeoutController.abort();
-      },
-      REQUEST_TIMEOUT_MS,
-    );
+    window.setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, REQUEST_TIMEOUT_MS);
 
   const abortHandler =
     () => {
       timeoutController.abort();
     };
 
-  if (
-    signal.aborted
-  ) {
+  if (signal.aborted) {
     timeoutController.abort();
   } else {
     signal.addEventListener(
@@ -1153,8 +1070,7 @@ async function fetchDatasetMetadata(
         ) ?? ""
       ).toLowerCase();
 
-    let body:
-      unknown = null;
+    let body: unknown = null;
 
     if (
       contentType.includes(
@@ -1177,9 +1093,7 @@ async function fetchDatasetMetadata(
       }
     }
 
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       const code =
         isObject(body) &&
         isNonEmptyString(
@@ -1222,9 +1136,7 @@ async function fetchDatasetMetadata(
         body,
       )
     ) {
-      if (
-        import.meta.env.DEV
-      ) {
+      if (import.meta.env.DEV) {
         console.error(
           "[DatasetPage] Invalid metadata response:",
           body,
@@ -1248,9 +1160,7 @@ async function fetchDatasetMetadata(
       throw new DatasetApiTimeoutError();
     }
 
-    if (
-      isAbortError(error)
-    ) {
+    if (isAbortError(error)) {
       throw error;
     }
 
@@ -1262,8 +1172,7 @@ async function fetchDatasetMetadata(
     }
 
     if (
-      error instanceof
-      TypeError
+      error instanceof TypeError
     ) {
       throw new DatasetApiError(
         "Unable to connect to the FastAPI machine-learning backend. Check the API URL, server availability and CORS configuration.",
@@ -1326,22 +1235,18 @@ function DatasetPageSkeleton() {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {Array.from({
             length: 4,
-          }).map(
-            (_, index) => (
-              <div
-                key={
-                  `stat-${index}`
-                }
-                className="animate-pulse rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-              >
-                <div className="h-4 w-24 rounded bg-slate-200" />
+          }).map((_, index) => (
+            <div
+              key={`stat-${index}`}
+              className="animate-pulse rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            >
+              <div className="h-4 w-24 rounded bg-slate-200" />
 
-                <div className="mt-4 h-8 w-32 rounded bg-slate-200" />
+              <div className="mt-4 h-8 w-32 rounded bg-slate-200" />
 
-                <div className="mt-4 h-10 w-full rounded bg-slate-100" />
-              </div>
-            ),
-          )}
+              <div className="mt-4 h-10 w-full rounded bg-slate-100" />
+            </div>
+          ))}
         </div>
       </section>
 
@@ -1359,7 +1264,7 @@ function DatasetPageSkeleton() {
 }
 
 /* ============================================================================
-   ERROR
+   ERROR STATE
 ============================================================================ */
 
 interface DatasetErrorStateProps {
@@ -1511,7 +1416,7 @@ export default function DatasetPage() {
     );
 
   /* ==========================================================================
-     LOAD
+     LOAD DATASET
   ========================================================================== */
 
   const loadDataset =
@@ -1522,8 +1427,7 @@ export default function DatasetPage() {
         },
       ) => {
         const refresh =
-          options?.refresh ??
-          false;
+          options?.refresh ?? false;
 
         activeRequestRef.current?.abort();
 
@@ -1576,9 +1480,7 @@ export default function DatasetPage() {
               ? err.message
               : "Unable to load dataset information.";
 
-          if (
-            import.meta.env.DEV
-          ) {
+          if (import.meta.env.DEV) {
             console.error(
               "[DatasetPage]",
               err,
@@ -1668,10 +1570,7 @@ export default function DatasetPage() {
      LOADING
   ========================================================================== */
 
-  if (
-    loading &&
-    !dataset
-  ) {
+  if (loading && !dataset) {
     return (
       <DatasetPageSkeleton />
     );
@@ -1681,10 +1580,7 @@ export default function DatasetPage() {
      ERROR
   ========================================================================== */
 
-  if (
-    error &&
-    !dataset
-  ) {
+  if (error && !dataset) {
     return (
       <DatasetErrorState
         message={error}
