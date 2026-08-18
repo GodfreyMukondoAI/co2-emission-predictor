@@ -69,7 +69,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.dataset import router as dataset_router
+from app.routes.dataset import router as dataset_router
 from app.api.routes import router
 
 
