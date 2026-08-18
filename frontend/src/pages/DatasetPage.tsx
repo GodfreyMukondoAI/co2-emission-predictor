@@ -3,46 +3,17 @@
  * CO₂ EMISSION PREDICTOR
  * ============================================================================
  *
- * DatasetPage
+ * DatasetPage.tsx
  *
  * Production-ready dataset information page.
  *
- * Architecture:
+ * FastAPI is the single source of truth.
  *
- * FastAPI is the single source of truth for:
- * - Dataset metadata
- * - Dataset statistics
- * - Feature definitions
- * - Model information
- * - Data quality information
+ * Backend endpoint:
+ *   GET /dataset/metadata
  *
- * Frontend responsibilities:
- * - Request dataset metadata
- * - Validate the runtime API response
- * - Safely format values
- * - Handle loading/error/refresh states
- * - Cancel stale requests
- * - Enforce request timeout
- * - Never trust unvalidated API data
- *
- * Environment variables:
- *
- * VITE_API_URL
- *   Development:
- *     http://127.0.0.1:8000
- *
- *   Production:
- *     https://co2-emission-predictor-ys3q.onrender.com
- *
- * VITE_DATASET_METADATA_ENDPOINT
- *   Optional.
- *   Defaults:
- *     /dataset/metadata
- *
- * VITE_API_TIMEOUT
- *   Optional.
- *   Defaults:
- *     30000
+ * Optional records endpoint:
+ *   GET /dataset/records
  *
  * ============================================================================
  */
@@ -73,7 +44,9 @@ import {
    TYPES
 ============================================================================ */
 
-type DatasetFeatureRole = "Feature" | "Target";
+type DatasetFeatureRole =
+  | "Feature"
+  | "Target";
 
 interface DatasetFeature {
   column: string;
@@ -160,7 +133,7 @@ interface ApiErrorResponse {
 }
 
 /* ============================================================================
-   ENVIRONMENT CONFIGURATION
+   CONSTANTS
 ============================================================================ */
 
 const DEFAULT_API_URL =
@@ -169,87 +142,111 @@ const DEFAULT_API_URL =
 const DEFAULT_DATASET_ENDPOINT =
   "/dataset/metadata";
 
-const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_TIMEOUT_MS =
+  30_000;
 
-const API_BASE_URL = normalizeBaseUrl(
-  import.meta.env.VITE_API_URL ||
-    DEFAULT_API_URL,
-);
+const MIN_TIMEOUT_MS =
+  1_000;
+
+const MAX_TIMEOUT_MS =
+  120_000;
+
+/* ============================================================================
+   ENVIRONMENT
+============================================================================ */
+
+function normalizeBaseUrl(
+  value: unknown,
+): string {
+  if (
+    typeof value !== "string" ||
+    !value.trim()
+  ) {
+    return DEFAULT_API_URL;
+  }
+
+  return value
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function normalizeEndpointPath(
+  value: unknown,
+): string {
+  if (
+    typeof value !== "string" ||
+    !value.trim()
+  ) {
+    return DEFAULT_DATASET_ENDPOINT;
+  }
+
+  const path =
+    value.trim();
+
+  return path.startsWith("/")
+    ? path
+    : `/${path}`;
+}
+
+function parseTimeout(
+  value: unknown,
+): number {
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number"
+  ) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+
+  const parsed =
+    Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+
+  return Math.min(
+    Math.max(
+      Math.floor(parsed),
+      MIN_TIMEOUT_MS,
+    ),
+    MAX_TIMEOUT_MS,
+  );
+}
+
+const API_BASE_URL =
+  normalizeBaseUrl(
+    import.meta.env
+      .VITE_API_URL,
+  );
 
 const DATASET_METADATA_PATH =
   normalizeEndpointPath(
     import.meta.env
-      .VITE_DATASET_METADATA_ENDPOINT ||
-      DEFAULT_DATASET_ENDPOINT,
+      .VITE_DATASET_METADATA_ENDPOINT,
   );
 
 const REQUEST_TIMEOUT_MS =
   parseTimeout(
-    import.meta.env.VITE_API_TIMEOUT ||
-      String(DEFAULT_TIMEOUT_MS),
+    import.meta.env
+      .VITE_API_TIMEOUT,
   );
 
 const DATASET_METADATA_ENDPOINT =
   `${API_BASE_URL}${DATASET_METADATA_PATH}`;
 
 /* ============================================================================
-   ENVIRONMENT HELPERS
-============================================================================ */
-
-function normalizeBaseUrl(
-  value: string,
-): string {
-  const normalized = value.trim();
-
-  if (!normalized) {
-    return DEFAULT_API_URL;
-  }
-
-  return normalized.replace(
-    /\/+$/,
-    "",
-  );
-}
-
-function normalizeEndpointPath(
-  value: string,
-): string {
-  const normalized = value.trim();
-
-  if (!normalized) {
-    return DEFAULT_DATASET_ENDPOINT;
-  }
-
-  return normalized.startsWith("/")
-    ? normalized
-    : `/${normalized}`;
-}
-
-function parseTimeout(
-  value: string,
-): number {
-  const timeout = Number(value);
-
-  if (
-    !Number.isFinite(timeout) ||
-    timeout <= 0
-  ) {
-    return DEFAULT_TIMEOUT_MS;
-  }
-
-  return Math.max(
-    1000,
-    Math.floor(timeout),
-  );
-}
-
-/* ============================================================================
    DEVELOPMENT DIAGNOSTICS
 ============================================================================ */
 
-if (import.meta.env.DEV) {
+if (
+  import.meta.env.DEV
+) {
   console.debug(
-    "[CO₂ Emission Predictor] Dataset API configuration",
+    "[DatasetPage] Configuration",
     {
       endpoint:
         DATASET_METADATA_ENDPOINT,
@@ -267,7 +264,10 @@ if (import.meta.env.DEV) {
 
 function isObject(
   value: unknown,
-): value is Record<string, unknown> {
+): value is Record<
+  string,
+  unknown
+> {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -298,7 +298,9 @@ function isStringArray(
 ): value is string[] {
   return (
     Array.isArray(value) &&
-    value.every(isNonEmptyString)
+    value.every(
+      isNonEmptyString,
+    )
   );
 }
 
@@ -343,12 +345,17 @@ function isDatasetFeature(
   }
 
   return (
-    isNonEmptyString(value.column) &&
-    (
-      value.role === "Feature" ||
-      value.role === "Target"
+    isNonEmptyString(
+      value.column,
     ) &&
-    typeof value.unit === "string" &&
+    (
+      value.role ===
+        "Feature" ||
+      value.role ===
+        "Target"
+    ) &&
+    typeof value.unit ===
+      "string" &&
     typeof value.description ===
       "string"
   );
@@ -366,21 +373,29 @@ function isDatasetStatisticResponse(
   }
 
   return (
-    isNonEmptyString(value.label) &&
-    isNonEmptyString(value.value) &&
+    isNonEmptyString(
+      value.label,
+    ) &&
+    isNonEmptyString(
+      value.value,
+    ) &&
     isNonEmptyString(
       value.description,
     ) &&
     (
-      value.type === undefined ||
-      value.type === null ||
-      isNonEmptyString(value.type)
+      value.type ===
+        undefined ||
+      value.type ===
+        null ||
+      isNonEmptyString(
+        value.type,
+      )
     )
   );
 }
 
 /* ============================================================================
-   NUMERIC STATISTICS VALIDATION
+   NUMERIC STATISTICS
 ============================================================================ */
 
 function isDatasetNumericStatistics(
@@ -390,11 +405,13 @@ function isDatasetNumericStatistics(
     return false;
   }
 
-  const min = value.min;
-  const max = value.max;
-  const mean = value.mean;
-  const median = value.median;
-  const std = value.std;
+  const {
+    min,
+    max,
+    mean,
+    median,
+    std,
+  } = value;
 
   return (
     isFiniteNumber(min) &&
@@ -407,10 +424,6 @@ function isDatasetNumericStatistics(
   );
 }
 
-/* ============================================================================
-   FEATURE STATISTICS VALIDATION
-============================================================================ */
-
 function isFeatureStatistics(
   value: unknown,
 ): value is Record<
@@ -421,21 +434,16 @@ function isFeatureStatistics(
     return false;
   }
 
-  const entries =
-    Object.entries(value);
-
-  return entries.every(
-    ([column, statistics]) =>
+  return Object.entries(
+    value,
+  ).every(
+    ([column, stats]) =>
       isNonEmptyString(column) &&
       isDatasetNumericStatistics(
-        statistics,
+        stats,
       ),
   );
 }
-
-/* ============================================================================
-   TARGET STATISTICS VALIDATION
-============================================================================ */
 
 function isTargetStatistics(
   value: unknown,
@@ -445,8 +453,12 @@ function isTargetStatistics(
   }
 
   return (
-    isNonEmptyString(value.column) &&
-    isDatasetNumericStatistics(value)
+    isNonEmptyString(
+      value.column,
+    ) &&
+    isDatasetNumericStatistics(
+      value,
+    )
   );
 }
 
@@ -462,20 +474,31 @@ function isDatasetModel(
   }
 
   return (
-    isNonEmptyString(value.name) &&
+    isNonEmptyString(
+      value.name,
+    ) &&
     isNonEmptyString(
       value.description,
     ) &&
-    isStringArray(value.features) &&
-    value.features.length > 0 &&
-    hasUniqueStrings(value.features) &&
-    isNonEmptyString(value.target) &&
-    isNonEmptyString(value.targetUnit)
+    isStringArray(
+      value.features,
+    ) &&
+    value.features.length >
+      0 &&
+    hasUniqueStrings(
+      value.features,
+    ) &&
+    isNonEmptyString(
+      value.target,
+    ) &&
+    isNonEmptyString(
+      value.targetUnit,
+    )
   );
 }
 
 /* ============================================================================
-   FULL DATASET VALIDATION
+   COMPLETE RESPONSE VALIDATION
 ============================================================================ */
 
 function isDatasetMetadataResponse(
@@ -485,24 +508,18 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Basic metadata
-  -------------------------------------------------------------------------- */
-
   if (
     !isNonEmptyString(
       value.datasetName,
     ) ||
-    !isNonEmptyString(value.title) ||
+    !isNonEmptyString(
+      value.title,
+    ) ||
     typeof value.description !==
       "string"
   ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Numeric counts
-  -------------------------------------------------------------------------- */
 
   const recordCount =
     value.recordCount;
@@ -551,53 +568,67 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Dataset must contain records
-  -------------------------------------------------------------------------- */
-
-  if (recordCount <= 0) {
+  if (
+    recordCount <= 0 ||
+    columnCount <= 0
+  ) {
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Validation percentage
-  -------------------------------------------------------------------------- */
+  if (
+    validRecordCount +
+      invalidRecordCount !==
+    recordCount
+  ) {
+    return false;
+  }
 
-  const validationPercentage =
-    value.validationPercentage;
+  if (
+    featureCount <= 0 ||
+    targetCount <= 0
+  ) {
+    return false;
+  }
 
   if (
     !isPercentage(
-      validationPercentage,
+      value.validationPercentage,
     )
   ) {
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Column names
-  -------------------------------------------------------------------------- */
+  const calculatedPercentage =
+    (
+      validRecordCount /
+      recordCount
+    ) *
+    100;
+
+  if (
+    Math.abs(
+      calculatedPercentage -
+        value.validationPercentage,
+    ) > 0.2
+  ) {
+    return false;
+  }
 
   const columnNames =
     value.columnNames;
 
   if (
-    !isStringArray(columnNames) ||
-    !hasUniqueStrings(columnNames)
+    !isStringArray(
+      columnNames,
+    ) ||
+    columnNames.length !==
+      columnCount ||
+    !hasUniqueStrings(
+      columnNames,
+    )
   ) {
     return false;
   }
-
-  if (
-    columnCount !==
-    columnNames.length
-  ) {
-    return false;
-  }
-
-  /* --------------------------------------------------------------------------
-     Features
-  -------------------------------------------------------------------------- */
 
   const features =
     value.features;
@@ -616,7 +647,8 @@ function isDatasetMetadataResponse(
     features
       .filter(
         (feature) =>
-          feature.role === "Feature",
+          feature.role ===
+          "Feature",
       )
       .map(
         (feature) =>
@@ -627,19 +659,23 @@ function isDatasetMetadataResponse(
     features
       .filter(
         (feature) =>
-          feature.role === "Target",
+          feature.role ===
+          "Target",
       )
       .map(
         (feature) =>
           feature.column,
       );
 
+  const allFeatureColumns =
+    features.map(
+      (feature) =>
+        feature.column,
+    );
+
   if (
     !hasUniqueStrings(
-      features.map(
-        (feature) =>
-          feature.column,
-      ),
+      allFeatureColumns,
     )
   ) {
     return false;
@@ -659,20 +695,25 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Model
-  -------------------------------------------------------------------------- */
+  if (
+    !features.every(
+      (feature) =>
+        columnNames.includes(
+          feature.column,
+        ),
+    )
+  ) {
+    return false;
+  }
 
   const model =
     value.model;
 
-  if (!isDatasetModel(model)) {
+  if (
+    !isDatasetModel(model)
+  ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Model feature integrity
-  -------------------------------------------------------------------------- */
 
   if (
     model.features.length !==
@@ -692,10 +733,6 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /* --------------------------------------------------------------------------
-     Target integrity
-  -------------------------------------------------------------------------- */
-
   if (
     !columnNames.includes(
       model.target,
@@ -705,43 +742,27 @@ function isDatasetMetadataResponse(
   }
 
   if (
-    targetCount !== 1
-  ) {
-    return false;
-  }
-
-  if (
-    targetColumns.length !== 1
-  ) {
-    return false;
-  }
-
-  if (
+    targetCount !== 1 ||
+    targetColumns.length !== 1 ||
     targetColumns[0] !==
-    model.target
+      model.target
   ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Statistics
-  -------------------------------------------------------------------------- */
 
   const statistics =
     value.statistics;
 
   if (
-    !Array.isArray(statistics) ||
+    !Array.isArray(
+      statistics,
+    ) ||
     !statistics.every(
       isDatasetStatisticResponse,
     )
   ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Feature statistics
-  -------------------------------------------------------------------------- */
 
   const featureStatistics =
     value.featureStatistics;
@@ -754,12 +775,9 @@ function isDatasetMetadataResponse(
     return false;
   }
 
-  /*
-   * Every model feature must have
-   * corresponding numeric statistics.
-   */
   for (
-    const feature of model.features
+    const feature of
+      model.features
   ) {
     if (
       !Object.prototype.hasOwnProperty.call(
@@ -771,79 +789,32 @@ function isDatasetMetadataResponse(
     }
   }
 
-  /* --------------------------------------------------------------------------
-     Target statistics
-  -------------------------------------------------------------------------- */
-
   const targetStatistics =
     value.targetStatistics;
 
   if (
     !isTargetStatistics(
       targetStatistics,
-    )
-  ) {
-    return false;
-  }
-
-  if (
+    ) ||
     targetStatistics.column !==
-    model.target
+      model.target
   ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Missing values integrity
-  -------------------------------------------------------------------------- */
 
   if (
     missingValues >
-    recordCount * columnCount
+    recordCount *
+      columnCount
   ) {
     return false;
   }
-
-  /* --------------------------------------------------------------------------
-     Record integrity
-  -------------------------------------------------------------------------- */
-
-  if (
-    validRecordCount +
-      invalidRecordCount !==
-    recordCount
-  ) {
-    return false;
-  }
-
-  /* --------------------------------------------------------------------------
-     Validation percentage integrity
-  -------------------------------------------------------------------------- */
-
-  const calculatedPercentage =
-    (
-      validRecordCount /
-      recordCount
-    ) *
-    100;
-
-  if (
-    Math.abs(
-      calculatedPercentage -
-        validationPercentage,
-    ) > 0.2
-  ) {
-    return false;
-  }
-
-  /* --------------------------------------------------------------------------
-     Last updated
-  -------------------------------------------------------------------------- */
 
   if (
     value.lastUpdated !==
       undefined &&
-    value.lastUpdated !== null &&
+    value.lastUpdated !==
+      null &&
     !isNonEmptyString(
       value.lastUpdated,
     )
@@ -855,14 +826,16 @@ function isDatasetMetadataResponse(
 }
 
 /* ============================================================================
-   ICON RESOLUTION
+   ICONS
 ============================================================================ */
 
 function getStatisticIcon(
   type?: string | null,
 ): LucideIcon {
   switch (
-    type?.trim().toLowerCase()
+    type
+      ?.trim()
+      .toLowerCase()
   ) {
     case "records":
       return Rows3;
@@ -890,7 +863,9 @@ function getStatisticIcon(
 function formatNumber(
   value: number,
 ): string {
-  if (!Number.isFinite(value)) {
+  if (
+    !Number.isFinite(value)
+  ) {
     return "—";
   }
 
@@ -905,17 +880,16 @@ function formatNumber(
 function formatPercentage(
   value: number,
 ): string {
-  if (!Number.isFinite(value)) {
+  if (
+    !Number.isFinite(value)
+  ) {
     return "—";
   }
 
-  const safeValue =
-    Math.min(
-      Math.max(value, 0),
-      100,
-    );
-
-  return `${safeValue.toFixed(1)}%`;
+  return `${Math.min(
+    Math.max(value, 0),
+    100,
+  ).toFixed(1)}%`;
 }
 
 function formatDate(
@@ -925,7 +899,8 @@ function formatDate(
     return null;
   }
 
-  const date = new Date(value);
+  const date =
+    new Date(value);
 
   if (
     Number.isNaN(
@@ -954,30 +929,69 @@ function formatDate(
 
 function getApiErrorMessage(
   body: unknown,
-  status: number,
+  statusCode: number,
 ): string {
   if (isObject(body)) {
-    const errorBody =
-      body as ApiErrorResponse;
-
     const candidates = [
-      errorBody.detail,
-      errorBody.message,
-      errorBody.error,
+      body.detail,
+      body.message,
+      body.error,
     ];
 
     for (
-      const candidate of candidates
+      const candidate of
+        candidates
     ) {
       if (
-        isNonEmptyString(candidate)
+        isNonEmptyString(
+          candidate,
+        )
       ) {
         return candidate;
+      }
+
+      if (
+        Array.isArray(
+          candidate,
+        )
+      ) {
+        const messages =
+          candidate
+            .map(
+              (item) => {
+                if (
+                  isObject(item) &&
+                  isNonEmptyString(
+                    item.msg,
+                  )
+                ) {
+                  return item.msg;
+                }
+
+                return null;
+              },
+            )
+            .filter(
+              (
+                message,
+              ): message is string =>
+                message !== null,
+            );
+
+        if (
+          messages.length
+        ) {
+          return messages.join(
+            " ",
+          );
+        }
       }
     }
   }
 
-  switch (status) {
+  switch (
+    statusCode
+  ) {
     case 400:
       return "The dataset metadata request was invalid.";
 
@@ -1005,12 +1019,12 @@ function getApiErrorMessage(
       return "The machine-learning API is temporarily unavailable. Please try again shortly.";
 
     default:
-      return `Dataset API request failed with HTTP ${status}.`;
+      return `Dataset API request failed with HTTP ${statusCode}.`;
   }
 }
 
 /* ============================================================================
-   ERROR TYPES
+   API ERRORS
 ============================================================================ */
 
 class DatasetApiError
@@ -1055,15 +1069,17 @@ class DatasetApiTimeoutError
 }
 
 /* ============================================================================
-   ABORT HELPERS
+   ABORT DETECTION
 ============================================================================ */
 
 function isAbortError(
   error: unknown,
 ): boolean {
   return (
-    error instanceof DOMException &&
-    error.name === "AbortError"
+    error instanceof
+      DOMException &&
+    error.name ===
+      "AbortError"
   );
 }
 
@@ -1080,16 +1096,22 @@ async function fetchDatasetMetadata(
   let timedOut = false;
 
   const timeoutId =
-    window.setTimeout(() => {
-      timedOut = true;
+    window.setTimeout(
+      () => {
+        timedOut = true;
+        timeoutController.abort();
+      },
+      REQUEST_TIMEOUT_MS,
+    );
+
+  const abortHandler =
+    () => {
       timeoutController.abort();
-    }, REQUEST_TIMEOUT_MS);
+    };
 
-  const abortHandler = () => {
-    timeoutController.abort();
-  };
-
-  if (signal.aborted) {
+  if (
+    signal.aborted
+  ) {
     timeoutController.abort();
   } else {
     signal.addEventListener(
@@ -1131,8 +1153,8 @@ async function fetchDatasetMetadata(
         ) ?? ""
       ).toLowerCase();
 
-    let responseBody: unknown =
-      null;
+    let body:
+      unknown = null;
 
     if (
       contentType.includes(
@@ -1140,7 +1162,7 @@ async function fetchDatasetMetadata(
       )
     ) {
       try {
-        responseBody =
+        body =
           await response.json();
       } catch {
         throw new DatasetApiError(
@@ -1155,27 +1177,26 @@ async function fetchDatasetMetadata(
       }
     }
 
-    if (!response.ok) {
-      const responseCode =
-        isObject(
-          responseBody,
-        ) &&
+    if (
+      !response.ok
+    ) {
+      const code =
+        isObject(body) &&
         isNonEmptyString(
-          responseBody.code,
+          body.code,
         )
-          ? responseBody.code
+          ? body.code
           : undefined;
 
       throw new DatasetApiError(
         getApiErrorMessage(
-          responseBody,
+          body,
           response.status,
         ),
         {
           status:
             response.status,
-          code:
-            responseCode,
+          code,
         },
       );
     }
@@ -1198,13 +1219,15 @@ async function fetchDatasetMetadata(
 
     if (
       !isDatasetMetadataResponse(
-        responseBody,
+        body,
       )
     ) {
-      if (import.meta.env.DEV) {
+      if (
+        import.meta.env.DEV
+      ) {
         console.error(
-          "[DatasetPage] Invalid dataset metadata response:",
-          responseBody,
+          "[DatasetPage] Invalid metadata response:",
+          body,
         );
       }
 
@@ -1219,13 +1242,15 @@ async function fetchDatasetMetadata(
       );
     }
 
-    return responseBody;
+    return body;
   } catch (error) {
     if (timedOut) {
       throw new DatasetApiTimeoutError();
     }
 
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error)
+    ) {
       throw error;
     }
 
@@ -1237,7 +1262,8 @@ async function fetchDatasetMetadata(
     }
 
     if (
-      error instanceof TypeError
+      error instanceof
+      TypeError
     ) {
       throw new DatasetApiError(
         "Unable to connect to the FastAPI machine-learning backend. Check the API URL, server availability and CORS configuration.",
@@ -1268,7 +1294,7 @@ async function fetchDatasetMetadata(
 }
 
 /* ============================================================================
-   LOADING COMPONENT
+   SKELETON
 ============================================================================ */
 
 function DatasetPageSkeleton() {
@@ -1303,7 +1329,9 @@ function DatasetPageSkeleton() {
           }).map(
             (_, index) => (
               <div
-                key={`statistic-skeleton-${index}`}
+                key={
+                  `stat-${index}`
+                }
                 className="animate-pulse rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
               >
                 <div className="h-4 w-24 rounded bg-slate-200" />
@@ -1331,7 +1359,7 @@ function DatasetPageSkeleton() {
 }
 
 /* ============================================================================
-   ERROR COMPONENT
+   ERROR
 ============================================================================ */
 
 interface DatasetErrorStateProps {
@@ -1483,7 +1511,7 @@ export default function DatasetPage() {
     );
 
   /* ==========================================================================
-     LOAD DATASET
+     LOAD
   ========================================================================== */
 
   const loadDataset =
@@ -1492,14 +1520,11 @@ export default function DatasetPage() {
         options?: {
           refresh?: boolean;
         },
-      ): Promise<void> => {
+      ) => {
         const refresh =
           options?.refresh ??
           false;
 
-        /*
-         * Cancel the previous request.
-         */
         activeRequestRef.current?.abort();
 
         const controller =
@@ -1522,28 +1547,16 @@ export default function DatasetPage() {
               controller.signal,
             );
 
-          /*
-           * Ignore stale requests.
-           */
           if (
-            controller.signal.aborted
-          ) {
-            return;
-          }
-
-          if (
+            controller.signal.aborted ||
             activeRequestRef.current !==
-            controller
+              controller
           ) {
             return;
           }
 
           setDataset(data);
         } catch (err) {
-          /*
-           * Aborted requests are expected
-           * during refresh/unmount.
-           */
           if (
             isAbortError(err) ||
             controller.signal.aborted
@@ -1561,11 +1574,13 @@ export default function DatasetPage() {
           const message =
             err instanceof Error
               ? err.message
-              : "Unable to load dataset information from the AI API.";
+              : "Unable to load dataset information.";
 
-          if (import.meta.env.DEV) {
+          if (
+            import.meta.env.DEV
+          ) {
             console.error(
-              "[DatasetPage] Dataset request failed:",
+              "[DatasetPage]",
               err,
             );
           }
@@ -1596,62 +1611,42 @@ export default function DatasetPage() {
 
     return () => {
       activeRequestRef.current?.abort();
-
       activeRequestRef.current =
         null;
     };
   }, [loadDataset]);
 
   /* ==========================================================================
-     STATISTICS
+     DERIVED DATA
   ========================================================================== */
 
   const statistics =
-    useMemo<
-      DatasetStatistic[]
-    >(() => {
-      if (!dataset) {
-        return [];
-      }
-
-      return dataset.statistics.map(
-        (statistic) => ({
-          label:
-            statistic.label,
-          value:
-            statistic.value,
-          description:
-            statistic.description,
-          icon:
-            getStatisticIcon(
-              statistic.type,
-            ),
-        }),
-      );
-    }, [dataset]);
-
-  /* ==========================================================================
-     VALIDATION PERCENTAGE
-  ========================================================================== */
+    useMemo(
+      () =>
+        dataset
+          ? dataset.statistics.map(
+              (statistic) => ({
+                ...statistic,
+                icon:
+                  getStatisticIcon(
+                    statistic.type,
+                  ),
+              }),
+            )
+          : [],
+      [dataset],
+    );
 
   const validationPercentage =
-    useMemo(() => {
-      if (!dataset) {
-        return 0;
-      }
-
-      return Math.min(
-        Math.max(
-          dataset.validationPercentage,
-          0,
-        ),
-        100,
-      );
-    }, [dataset]);
-
-  /* ==========================================================================
-     LAST UPDATED
-  ========================================================================== */
+    dataset
+      ? Math.min(
+          Math.max(
+            dataset.validationPercentage,
+            0,
+          ),
+          100,
+        )
+      : 0;
 
   const formattedLastUpdated =
     useMemo(
@@ -1662,10 +1657,6 @@ export default function DatasetPage() {
       [dataset?.lastUpdated],
     );
 
-  /* ==========================================================================
-     REFRESH
-  ========================================================================== */
-
   const handleRefresh =
     useCallback(() => {
       void loadDataset({
@@ -1674,7 +1665,7 @@ export default function DatasetPage() {
     }, [loadDataset]);
 
   /* ==========================================================================
-     INITIAL LOADING
+     LOADING
   ========================================================================== */
 
   if (
@@ -1687,7 +1678,7 @@ export default function DatasetPage() {
   }
 
   /* ==========================================================================
-     INITIAL ERROR
+     ERROR
   ========================================================================== */
 
   if (
@@ -1697,12 +1688,8 @@ export default function DatasetPage() {
     return (
       <DatasetErrorState
         message={error}
-        refreshing={
-          refreshing
-        }
-        onRetry={
-          handleRefresh
-        }
+        refreshing={refreshing}
+        onRetry={handleRefresh}
       />
     );
   }
@@ -1711,38 +1698,18 @@ export default function DatasetPage() {
     return (
       <DatasetErrorState
         message="Dataset information is currently unavailable."
-        refreshing={
-          refreshing
-        }
-        onRetry={
-          handleRefresh
-        }
+        refreshing={refreshing}
+        onRetry={handleRefresh}
       />
     );
   }
 
   /* ==========================================================================
-     SAFE VALUES
-  ========================================================================== */
-
-  const hasFeatures =
-    dataset.features.length >
-    0;
-
-  const hasStatistics =
-    statistics.length >
-    0;
-
-  /* ==========================================================================
-     PAGE
+     RENDER
   ========================================================================== */
 
   return (
     <div className="space-y-8 pb-10">
-      {/* ======================================================================
-          ACCESSIBLE REFRESH STATUS
-      ====================================================================== */}
-
       <div
         className="sr-only"
         aria-live="polite"
@@ -1755,19 +1722,11 @@ export default function DatasetPage() {
             : "Dataset information loaded."}
       </div>
 
-      {/* ======================================================================
-          REFRESH ERROR
-      ====================================================================== */}
-
       {error && (
         <RefreshError
           message={error}
-          onRetry={
-            handleRefresh
-          }
-          refreshing={
-            refreshing
-          }
+          onRetry={handleRefresh}
+          refreshing={refreshing}
         />
       )}
 
@@ -1794,7 +1753,6 @@ export default function DatasetPage() {
                   size={14}
                   aria-hidden="true"
                 />
-
                 Dataset
               </div>
 
@@ -1809,12 +1767,8 @@ export default function DatasetPage() {
 
             <button
               type="button"
-              onClick={
-                handleRefresh
-              }
-              disabled={
-                refreshing
-              }
+              onClick={handleRefresh}
+              disabled={refreshing}
               aria-label={
                 refreshing
                   ? "Refreshing dataset information"
@@ -1863,8 +1817,7 @@ export default function DatasetPage() {
                 dataset.featureCount,
               )}{" "}
               input{" "}
-              {dataset.featureCount ===
-              1
+              {dataset.featureCount === 1
                 ? "feature"
                 : "features"}
             </div>
@@ -1880,8 +1833,7 @@ export default function DatasetPage() {
                 dataset.targetCount,
               )}{" "}
               prediction{" "}
-              {dataset.targetCount ===
-              1
+              {dataset.targetCount === 1
                 ? "target"
                 : "targets"}
             </div>
@@ -1890,12 +1842,10 @@ export default function DatasetPage() {
       </header>
 
       {/* ======================================================================
-          DATASET OVERVIEW
+          OVERVIEW
       ====================================================================== */}
 
-      <section
-        aria-labelledby="dataset-overview-heading"
-      >
+      <section aria-labelledby="dataset-overview-heading">
         <div className="mb-4">
           <h2
             id="dataset-overview-heading"
@@ -1909,7 +1859,7 @@ export default function DatasetPage() {
           </p>
         </div>
 
-        {!hasStatistics ? (
+        {statistics.length === 0 ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
             <Database
               size={32}
@@ -1939,19 +1889,15 @@ export default function DatasetPage() {
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0">
                         <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                          {
-                            statistic.label
-                          }
+                          {statistic.label}
                         </p>
 
                         <p className="mt-3 break-words text-2xl font-bold tracking-tight text-slate-950">
-                          {
-                            statistic.value
-                          }
+                          {statistic.value}
                         </p>
                       </div>
 
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 transition group-hover:bg-emerald-100">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
                         <Icon
                           size={20}
                           aria-hidden="true"
@@ -1960,9 +1906,7 @@ export default function DatasetPage() {
                     </div>
 
                     <p className="mt-3 text-xs leading-5 text-slate-500">
-                      {
-                        statistic.description
-                      }
+                      {statistic.description}
                     </p>
                   </article>
                 );
@@ -1973,7 +1917,7 @@ export default function DatasetPage() {
       </section>
 
       {/* ======================================================================
-          DATASET INFORMATION
+          DATASET COUNTS
       ====================================================================== */}
 
       <section
@@ -2051,7 +1995,7 @@ export default function DatasetPage() {
       </section>
 
       {/* ======================================================================
-          DATASET FEATURES
+          FEATURES
       ====================================================================== */}
 
       <section
@@ -2067,7 +2011,7 @@ export default function DatasetPage() {
               />
             </div>
 
-            <div className="min-w-0">
+            <div>
               <h2
                 id="dataset-features-heading"
                 className="font-bold text-slate-950"
@@ -2078,9 +2022,7 @@ export default function DatasetPage() {
               <p className="mt-1 text-sm leading-6 text-slate-500">
                 Variables used by{" "}
                 <strong className="font-semibold text-slate-700">
-                  {
-                    dataset.model.name
-                  }
+                  {dataset.model.name}
                 </strong>
                 .
               </p>
@@ -2088,107 +2030,72 @@ export default function DatasetPage() {
           </div>
         </div>
 
-        {!hasFeatures ? (
-          <div className="p-10 text-center">
-            <Database
-              size={32}
-              className="mx-auto text-slate-300"
-              aria-hidden="true"
-            />
+        <div className="overflow-x-auto">
+          <table className="min-w-[760px] w-full text-left text-sm">
+            <caption className="sr-only">
+              {dataset.datasetName} dataset features
+            </caption>
 
-            <p className="mt-3 text-sm font-medium text-slate-600">
-              No dataset features are currently available.
-            </p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-[760px] w-full text-left text-sm">
-              <caption className="sr-only">
-                {
-                  dataset.datasetName
-                }{" "}
-                dataset features
-              </caption>
+            <thead className="border-b border-slate-200 bg-slate-50">
+              <tr>
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Column
+                </th>
 
-              <thead className="border-b border-slate-200 bg-slate-50">
-                <tr>
-                  <th
-                    scope="col"
-                    className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500"
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Role
+                </th>
+
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Unit
+                </th>
+
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Description
+                </th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-slate-100">
+              {dataset.features.map(
+                (feature) => (
+                  <tr
+                    key={`${feature.role}-${feature.column}`}
+                    className="transition hover:bg-slate-50/80"
                   >
-                    Column
-                  </th>
+                    <td className="px-6 py-5">
+                      <code className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-800">
+                        {feature.column}
+                      </code>
+                    </td>
 
-                  <th
-                    scope="col"
-                    className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500"
-                  >
-                    Role
-                  </th>
-
-                  <th
-                    scope="col"
-                    className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500"
-                  >
-                    Unit
-                  </th>
-
-                  <th
-                    scope="col"
-                    className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-500"
-                  >
-                    Description
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody className="divide-y divide-slate-100">
-                {dataset.features.map(
-                  (feature) => (
-                    <tr
-                      key={`${feature.role}-${feature.column}`}
-                      className="transition hover:bg-slate-50/80"
-                    >
-                      <td className="px-6 py-5">
-                        <code className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-800">
-                          {
-                            feature.column
-                          }
-                        </code>
-                      </td>
-
-                      <td className="px-6 py-5">
-                        <span
-                          className={
-                            feature.role ===
-                            "Target"
-                              ? "inline-flex items-center rounded-full bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700"
-                              : "inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700"
-                          }
-                        >
-                          {
-                            feature.role
-                          }
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-5 font-medium text-slate-700">
-                        {feature.unit ||
-                          "—"}
-                      </td>
-
-                      <td className="max-w-md px-6 py-5 leading-6 text-slate-500">
-                        {
-                          feature.description
+                    <td className="px-6 py-5">
+                      <span
+                        className={
+                          feature.role ===
+                          "Target"
+                            ? "inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700"
+                            : "inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700"
                         }
-                      </td>
-                    </tr>
-                  ),
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
+                      >
+                        {feature.role}
+                      </span>
+                    </td>
+
+                    <td className="px-6 py-5 font-medium text-slate-700">
+                      {feature.unit ||
+                        "—"}
+                    </td>
+
+                    <td className="max-w-md px-6 py-5 leading-6 text-slate-500">
+                      {feature.description}
+                    </td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
 
         <div className="border-t border-slate-200 bg-slate-50/70 px-6 py-4">
           <div className="flex items-start gap-3">
@@ -2212,8 +2119,7 @@ export default function DatasetPage() {
                 )}
               </strong>{" "}
               input{" "}
-              {dataset.featureCount ===
-              1
+              {dataset.featureCount === 1
                 ? "feature"
                 : "features"}{" "}
               and{" "}
@@ -2223,8 +2129,7 @@ export default function DatasetPage() {
                 )}
               </strong>{" "}
               target{" "}
-              {dataset.targetCount ===
-              1
+              {dataset.targetCount === 1
                 ? "variable."
                 : "variables."}
             </p>
@@ -2233,7 +2138,7 @@ export default function DatasetPage() {
       </section>
 
       {/* ======================================================================
-          MODEL INFORMATION
+          MODEL
       ====================================================================== */}
 
       <section
@@ -2248,7 +2153,7 @@ export default function DatasetPage() {
             />
           </div>
 
-          <div className="min-w-0">
+          <div>
             <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
               Machine Learning Model
             </p>
@@ -2257,16 +2162,11 @@ export default function DatasetPage() {
               id="model-information-heading"
               className="mt-1 text-xl font-bold text-slate-950"
             >
-              {
-                dataset.model.name
-              }
+              {dataset.model.name}
             </h2>
 
             <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-500">
-              {
-                dataset.model
-                  .description
-              }
+              {dataset.model.description}
             </p>
           </div>
         </div>
@@ -2297,9 +2197,7 @@ export default function DatasetPage() {
             </p>
 
             <code className="mt-3 inline-block rounded-lg bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200">
-              {
-                dataset.model.target
-              }
+              {dataset.model.target}
             </code>
           </div>
 
@@ -2309,10 +2207,7 @@ export default function DatasetPage() {
             </p>
 
             <p className="mt-3 text-lg font-bold text-slate-950">
-              {
-                dataset.model
-                  .targetUnit
-              }
+              {dataset.model.targetUnit}
             </p>
           </div>
         </div>
@@ -2375,8 +2270,7 @@ export default function DatasetPage() {
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-500"
                 style={{
-                  width:
-                    `${validationPercentage}%`,
+                  width: `${validationPercentage}%`,
                 }}
               />
             </div>
@@ -2404,7 +2298,7 @@ export default function DatasetPage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-950 to-slate-900 p-6 text-white shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-slate-950 p-6 text-white shadow-sm">
           <div className="flex items-start gap-4">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 text-emerald-300">
               <BarChart3
@@ -2413,16 +2307,13 @@ export default function DatasetPage() {
               />
             </div>
 
-            <div className="min-w-0">
+            <div>
               <h2 className="font-bold">
                 How the dataset is used
               </h2>
 
               <p className="mt-2 text-sm leading-6 text-slate-300">
-                {
-                  dataset.model
-                    .description
-                }
+                {dataset.model.description}
               </p>
             </div>
           </div>
@@ -2440,11 +2331,7 @@ export default function DatasetPage() {
               </p>
 
               <p className="mt-1 text-xs text-slate-400">
-                Model{" "}
-                {dataset.featureCount ===
-                1
-                  ? "feature"
-                  : "features"}
+                Model features
               </p>
             </div>
 
@@ -2460,11 +2347,7 @@ export default function DatasetPage() {
               </p>
 
               <p className="mt-1 text-xs text-slate-400">
-                Prediction{" "}
-                {dataset.targetCount ===
-                1
-                  ? "target"
-                  : "targets"}
+                Prediction target
               </p>
             </div>
 
@@ -2496,9 +2379,7 @@ export default function DatasetPage() {
           <p>
             Dataset:{" "}
             <span className="font-medium text-slate-500">
-              {
-                dataset.datasetName
-              }
+              {dataset.datasetName}
             </span>
           </p>
 
@@ -2511,9 +2392,7 @@ export default function DatasetPage() {
                   undefined
                 }
               >
-                {
-                  formattedLastUpdated
-                }
+                {formattedLastUpdated}
               </time>
             </p>
           )}
